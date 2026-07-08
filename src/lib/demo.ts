@@ -112,8 +112,84 @@ function vergel(): string {
   return c.toDataURL('image/png');
 }
 
+// homenaje procedural a La noche estrellada (Van Gogh, 1889, dominio público):
+// remolinos áureos, estrellas con halo, el ciprés como llama oscura
+function nocheEstelar(): string {
+  const [c, ctx] = makeCanvas();
+  const bg = ctx.createLinearGradient(0, 0, 0, 360);
+  bg.addColorStop(0, '#1b2a5e');
+  bg.addColorStop(0.6, '#2a4485');
+  bg.addColorStop(1, '#16204a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, 480, 360);
+  // remolinos: espirales de trazos
+  const swirl = (cx: number, cy: number, r0: number, turns: number, color: string) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    for (let t = 0; t <= turns * Math.PI * 2; t += 0.15) {
+      const r = r0 * (1 - t / (turns * Math.PI * 2 + 1));
+      const x = cx + Math.cos(t) * r;
+      const y = cy + Math.sin(t) * r * 0.62;
+      if (t === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+  swirl(200, 120, 90, 2.2, '#7ea0d8');
+  swirl(210, 125, 60, 1.8, '#b8cbe8');
+  swirl(340, 80, 50, 1.6, '#8fb0e0');
+  // estrellas con halo
+  const star = (x: number, y: number, r: number) => {
+    ctx.fillStyle = 'rgba(240,220,130,0.35)';
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f2d878';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  star(70, 60, 9);
+  star(300, 40, 6);
+  star(420, 120, 7);
+  star(120, 160, 5);
+  star(440, 40, 11); // la luna-sol
+  // colinas
+  ctx.fillStyle = '#22315e';
+  ctx.beginPath();
+  ctx.moveTo(0, 250);
+  ctx.quadraticCurveTo(150, 210, 300, 255);
+  ctx.quadraticCurveTo(400, 285, 480, 260);
+  ctx.lineTo(480, 360);
+  ctx.lineTo(0, 360);
+  ctx.fill();
+  // aldea
+  ctx.fillStyle = '#141c38';
+  for (let i = 0; i < 7; i++) {
+    const x = 150 + i * 40;
+    ctx.fillRect(x, 285 - (i % 3) * 8, 22, 40);
+  }
+  ctx.fillStyle = '#e8c86a';
+  for (let i = 0; i < 7; i++) {
+    const x = 156 + i * 40;
+    ctx.fillRect(x, 295 - (i % 3) * 8, 4, 5);
+  }
+  // el ciprés: llama oscura
+  ctx.fillStyle = '#0e1a14';
+  ctx.beginPath();
+  ctx.moveTo(60, 360);
+  ctx.quadraticCurveTo(40, 260, 62, 190);
+  ctx.quadraticCurveTo(72, 150, 66, 120);
+  ctx.quadraticCurveTo(84, 170, 78, 230);
+  ctx.quadraticCurveTo(92, 300, 84, 360);
+  ctx.fill();
+  return c.toDataURL('image/png');
+}
+
 export function makeDemos(): DemoImage[] {
   return [
+    { name: 'Noche estelar', dataUrl: nocheEstelar() },
     { name: 'Atardecer', dataUrl: atardecer() },
     { name: 'Nebulosa', dataUrl: nebulosa() },
     { name: 'Vergel', dataUrl: vergel() },

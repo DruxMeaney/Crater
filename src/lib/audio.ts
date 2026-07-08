@@ -177,6 +177,22 @@ export class CraterAudio {
     }
   }
 
+  // hechizo de reconstrucción: cascada de los 4 acordes en dos octavas + oleaje del drone
+  playCast(): void {
+    if (!this.ready || !this.ecoSynth || !this.comp) return;
+    const now = Tone.now();
+    let i = 0;
+    for (const chord of this.comp.chords) {
+      for (const n of chord) {
+        const note = Tone.Frequency(n).transpose(12 + (i % 2) * 12).toNote();
+        this.ecoSynth.triggerAttackRelease(note, '2n', now + i * 0.11, 0.4);
+        i++;
+      }
+    }
+    this.droneGain?.gain.rampTo(0.3, 1.2);
+    this.droneGain?.gain.rampTo(0.14, 4, Tone.now() + 2);
+  }
+
   // eco recogido: arpegio de campanas con el acorde asociado a esa pista
   playEco(trackId: number): void {
     if (!this.ready || !this.ecoSynth || !this.comp) return;

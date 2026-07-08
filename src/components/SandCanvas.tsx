@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { shade } from '../lib/color';
+import { fibonacciProfile, scaleProfileToArea, GOLDEN_SECTIONS } from '../lib/terrain';
+import { buildSprite, SPRITE_W, SPRITE_H, type Character, type SpriteSet } from '../lib/sprites';
 import type { CraterAudio } from '../lib/audio';
 import type { AnalyzedImage, Phase } from '../lib/types';
 
@@ -7,7 +9,8 @@ interface Props {
   analyzed: AnalyzedImage;
   audio: CraterAudio;
   phase: Phase;
-  walkMode: boolean; // modo caminata: el Grano recorre las dunas
+  walkMode: boolean; // modo caminata: el custodio recorre las dunas
+  character: Character;
   releaseOrder: number[]; // índices de paleta en orden de derrumbe
   onGroupRelease: (paletteIndex: number) => void;
   onCollapseDone: () => void;
@@ -47,7 +50,18 @@ interface Player {
   moving: boolean;
   stepDist: number;
   bob: number;
+  walkPhase: number; // anima las piernitas
   trail: Array<{ x: number; y: number; age: number }>;
+}
+
+// estado del juego dentro del nivel
+interface GameState {
+  orbs: number;
+  magic: number; // 0..100
+  hp: number; // 0..100 (decorativa en el nivel 1)
+  casting: number; // segundos restantes del hechizo (0 = inactivo)
+  castDone: boolean;
+  ghost: HTMLCanvasElement | null; // arena de ceniza: la huella de las dunas
 }
 
 interface Sim {
@@ -87,6 +101,8 @@ interface Sim {
   ry: Float32Array;
   returnT: Float32Array;
   walkClock: number;
+  targetH: Float32Array; // perfil Fibonacci que la arena debe rellenar
+  game: GameState;
 }
 
 export function SandCanvas({
@@ -94,6 +110,7 @@ export function SandCanvas({
   audio,
   phase,
   walkMode,
+  character,
   releaseOrder,
   onGroupRelease,
   onCollapseDone,
@@ -108,7 +125,12 @@ export function SandCanvas({
   const walkRef = useRef(walkMode);
   const audioRef = useRef(audio);
   audioRef.current = audio;
-  const keysRef = useRef({ left: false, right: false });
+  const keysRef = useRef({ left: false, right: false, cast: false });
+  const spriteRef = useRef<SpriteSet | null>(null);
+
+  useEffect(() => {
+    spriteRef.current = buildSprite(character);
+  }, [character]);
   const callbacksRef = useRef({ onGroupRelease, onCollapseDone, onReformDone, onEcoProgress, onWin });
   callbacksRef.current = { onGroupRelease, onCollapseDone, onReformDone, onEcoProgress, onWin };
 
@@ -178,35 +200,20 @@ export function SandCanvas({
       const floorY = H - 6;
       const numCols = Math.ceil(W / grainSize);
 
-      // ecos: uno por color, enterrado donde ese color tenía más densidad
-      const colCounts = palette.map(() => new Array<number>(32).fill(0));
-      for (let y = 0; y < ih; y++) {
-        for (let x = 0; x < iw; x++) {
-          const g = groups[y * iw + x];
-          if (g >= 0) colCounts[g][Math.min(31, Math.floor((x / iw) * 32))]++;
-        }
-      }
-      const ecos: Eco[] = palette.map((_, g) => {
-        let peak = 0;
-        for (let c = 1; c < 32; c++) if (colCounts[g][c] > colCounts[g][peak]) peak = c;
-        const u = (peak + 0.5) / 32;
-        return { u, group: g, collected: false, x: 0, y: floorY - 20 };
-      });
-      // separación mínima entre ecos (varios colores pueden picar en la misma columna)
-      const sorted = [...ecos].sort((a, b) => a.u - b.u);
-      const minGap = 0.09;
-      for (let i = 1; i < sorted.length; i++) {
-        if (sorted[i].u - sorted[i - 1].u < minGap) sorted[i].u = sorted[i - 1].u + minGap;
-      }
-      const overflow = sorted[sorted.length - 1].u - 0.97;
-      if (overflow > 0) for (const e of sorted) e.u -= overflow;
-      for (let i = sorted.length - 2; i >= 0; i--) {
-        if (sorted[i + 1].u - sorted[i].u < minGap) {
-          sorted[i].u = Math.max(0.03, sorted[i + 1].u - minGap);
-        }
-      }
-      // los ecos se reparten por todo el campo de dunas, no solo bajo la imagen
-      for (const e of ecos) e.x = W * (0.05 + 0.9 * e.u);
+      // orbes de canto: tres, en las secciones áureas del mapa (1/φ³, 1/φ², 1/φ),
+      // asignados a los tres colores de mayor cobertura
+      const orbCount = Math.min(3, palette.length);
+      const ecos: Eco[] = GOLDEN_SECTIONS.slice(0, orbCount).map((u, g) => ({
+        u,
+        group: g,
+        collected: false,
+        x: W * (0.05 + 0.9 * u),
+        y: floorY - 20,
+      }));
+
+      // perfil Fibonacci: la arena disponible rellenará esta silueta
+      // (cada grano asentado suma grainSize*0.82 px a la altura de su columna)
+      const targetH = scaleProfileToArea(fibonacciProfile(numCols, n), n * grainSize * 0.82);
 
       const sim: Sim = {
         n,
@@ -244,6 +251,7 @@ export function SandCanvas({
           moving: false,
           stepDist: 0,
           bob: 0,
+          walkPhase: 0,
           trail: [],
         },
         ecos,
@@ -251,6 +259,8 @@ export function SandCanvas({
         ry: new Float32Array(n),
         returnT: new Float32Array(n),
         walkClock: 0,
+        targetH,
+        game: { orbs: 0, magic: 0, hp: 100, casting: 0, castDone: false, ghost: null },
         styles: palette.map((p) => [
           shade(p.hex, 0.72),
           p.hex,
@@ -297,6 +307,7 @@ export function SandCanvas({
         trail: [],
       };
       next.ecos.forEach((e, i) => (e.collected = prev.ecos[i]?.collected ?? false));
+      next.game = { ...prev.game };
       if (phaseRef.current === 'collapsed' || phaseRef.current === 'collapsing') {
         if (next.n === prev.n) resettleFrom(prev, next);
         else settleInstant(next);
@@ -354,13 +365,12 @@ export function SandCanvas({
     if (walkMode && sim) {
       sim.player.x = sim.cssW * 0.12;
       sim.player.trail = [];
-      const total = sim.ecos.length;
-      const collected = sim.ecos.filter((e) => e.collected).length;
-      callbacksRef.current.onEcoProgress(collected, total);
+      callbacksRef.current.onEcoProgress(sim.game.orbs, sim.ecos.length);
     }
     if (!walkMode) {
       keysRef.current.left = false;
       keysRef.current.right = false;
+      keysRef.current.cast = false;
       return;
     }
     const down = (e: KeyboardEvent) => {
@@ -370,6 +380,10 @@ export function SandCanvas({
       }
       if (e.code === 'ArrowRight' || e.code === 'KeyD') {
         keysRef.current.right = true;
+        e.preventDefault();
+      }
+      if (e.code === 'KeyE') {
+        keysRef.current.cast = true;
         e.preventDefault();
       }
     };
@@ -413,7 +427,7 @@ export function SandCanvas({
 
       for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
 
-      draw(ctx, sim, walkRef.current);
+      draw(ctx, sim, walkRef.current, spriteRef.current);
     };
     raf = requestAnimationFrame(tick);
 
@@ -437,7 +451,7 @@ export function SandCanvas({
           }
           for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
         }
-        draw(ctx, sim, walkRef.current);
+        draw(ctx, sim, walkRef.current, spriteRef.current);
         return {
           ph: phaseRef.current,
           clock: sim.clock,
@@ -449,6 +463,7 @@ export function SandCanvas({
           walk: walkRef.current,
           player: { x: sim.player.x, y: sim.player.y },
           ecos: sim.ecos.map((e) => ({ x: Math.round(e.x), collected: e.collected })),
+          game: { ...sim.game, ghost: sim.game.ghost !== null },
         };
       };
       (window as unknown as Record<string, unknown>).__craterTeleport = (x: number) => {
@@ -516,6 +531,7 @@ function stepCollapse(
     let col = Math.min(sim.numCols - 1, Math.max(0, Math.floor(nx / sim.grainSize)));
     const groundY = sim.floorY - sim.pileH[col];
     if (ny >= groundY) {
+      col = seekDeficit(sim, col);
       col = rollTo(sim, col);
       sim.state[i] = SETTLED;
       sim.pileH[col] += sim.grainSize * 0.82;
@@ -532,6 +548,33 @@ function stepCollapse(
   if (allSettled && sim.released.every((r) => r === 1)) {
     cb.onCollapseDone();
   }
+}
+
+// la arena obedece a la ecuación: el grano busca la columna cercana donde el
+// perfil Fibonacci aún tiene hambre (mayor déficit entre objetivo y pila real)
+function seekDeficit(sim: Sim, col: number): number {
+  const RANGE = 26;
+  let best = col;
+  let bestDeficit = sim.targetH[col] - sim.pileH[col];
+  for (let d = 1; d <= RANGE; d++) {
+    const l = col - d;
+    const r = col + d;
+    if (l >= 0) {
+      const def = sim.targetH[l] - sim.pileH[l] - d * 0.35; // la distancia penaliza
+      if (def > bestDeficit) {
+        bestDeficit = def;
+        best = l;
+      }
+    }
+    if (r < sim.numCols) {
+      const def = sim.targetH[r] - sim.pileH[r] - d * 0.35;
+      if (def > bestDeficit) {
+        bestDeficit = def;
+        best = r;
+      }
+    }
+  }
+  return best;
 }
 
 // un grano rueda hacia el vecino más bajo si la pila local es muy empinada
@@ -558,20 +601,24 @@ function groundHeightAt(sim: Sim, x: number): number {
   return (a + b + c) / 3;
 }
 
+const CAST_TIME = 3.4; // duración del hechizo de reconstrucción
+
 function stepWalk(
   sim: Sim,
   dt: number,
-  keys: { left: boolean; right: boolean },
-  audio: { playStep: (h: number) => void; playEco: (g: number) => void },
+  keys: { left: boolean; right: boolean; cast: boolean },
+  audio: { playStep: (h: number) => void; playEco: (g: number) => void; playCast: () => void },
   cb: { onEcoProgress: (c: number, t: number) => void; onWin: () => void },
 ): void {
   const p = sim.player;
+  const g = sim.game;
   const vx = (keys.right ? WALK_SPEED : 0) - (keys.left ? WALK_SPEED : 0);
   p.moving = vx !== 0;
   if (p.moving) {
     p.dir = vx > 0 ? 1 : -1;
     p.x = Math.max(10, Math.min(sim.cssW - 10, p.x + vx * dt));
     p.bob += dt * 11;
+    p.walkPhase += dt * 7;
     p.stepDist += Math.abs(vx) * dt;
   }
 
@@ -589,25 +636,79 @@ function stepWalk(
   }
   for (const t of p.trail) t.age += dt;
 
-  // recoger ecos (solo caminando: nada de premios por quedarse quieto)
+  // recoger orbes de canto (solo caminando): cargan la magia, no reconstruyen aún
   for (const eco of sim.ecos) {
     eco.y = sim.floorY - groundHeightAt(sim, eco.x) - 14;
     if (eco.collected || !p.moving || Math.abs(p.x - eco.x) > ECO_RADIUS) continue;
     eco.collected = true;
     audio.playEco(eco.group);
-    // los granos de ese color emprenden el vuelo de regreso a la imagen
-    let k = 0;
+    g.orbs++;
+    g.magic = Math.min(100, g.magic + Math.ceil(100 / sim.ecos.length));
+    cb.onEcoProgress(g.orbs, sim.ecos.length);
+  }
+
+  // hechizo de reconstrucción: E con todos los orbes y la magia llena
+  const wantsCast = keys.cast;
+  keys.cast = false;
+  if (
+    wantsCast &&
+    g.casting === 0 &&
+    !g.castDone &&
+    g.ghost === null &&
+    g.orbs >= sim.ecos.length &&
+    g.magic >= 99
+  ) {
+    beginCast(sim, audio);
+  }
+
+  if (g.casting > 0) {
+    g.casting = Math.max(0, g.casting - dt);
+    g.magic = Math.max(0, 100 * (g.casting / CAST_TIME));
+  }
+  if (g.ghost !== null && g.casting === 0 && !g.castDone) {
+    let returning = false;
     for (let i = 0; i < sim.n; i++) {
-      if (sim.group[i] !== eco.group || sim.state[i] !== SETTLED) continue;
-      sim.state[i] = RETURNING;
-      sim.rx[i] = sim.x[i];
-      sim.ry[i] = sim.y[i];
-      sim.returnT[i] = -(k % 60) * 0.014; // el enjambre despega escalonado
-      k++;
+      if (sim.state[i] === RETURNING) {
+        returning = true;
+        break;
+      }
     }
-    const collected = sim.ecos.filter((e) => e.collected).length;
-    cb.onEcoProgress(collected, sim.ecos.length);
-    if (collected === sim.ecos.length) cb.onWin();
+    if (!returning) {
+      g.castDone = true;
+      cb.onWin();
+    }
+  }
+}
+
+function beginCast(sim: Sim, audio: { playCast: () => void }): void {
+  const g = sim.game;
+  g.casting = CAST_TIME;
+  audio.playCast();
+
+  // arena de ceniza: la huella gris de las dunas permanece cuando el color se va
+  const ghost = document.createElement('canvas');
+  ghost.width = Math.max(1, Math.round(sim.cssW));
+  ghost.height = Math.max(1, Math.round(sim.cssH));
+  const gtx = ghost.getContext('2d');
+  if (gtx) {
+    const ash = ['#2c313f', '#353b4b', '#40475a'];
+    for (let i = 0; i < sim.n; i++) {
+      if (sim.state[i] !== SETTLED) continue;
+      gtx.fillStyle = ash[sim.shadeIdx[i]];
+      gtx.fillRect(sim.x[i], sim.y[i], sim.grainSize, sim.grainSize);
+    }
+  }
+  g.ghost = ghost;
+
+  // toda la arena asentada despega en enjambre escalonado, color por color
+  let k = 0;
+  for (let i = 0; i < sim.n; i++) {
+    if (sim.state[i] !== SETTLED) continue;
+    sim.state[i] = RETURNING;
+    sim.rx[i] = sim.x[i];
+    sim.ry[i] = sim.y[i];
+    sim.returnT[i] = -(0.7 + sim.group[i] * 0.3 + (k % 130) * 0.011);
+    k++;
   }
 }
 
@@ -616,7 +717,13 @@ function stepReturning(sim: Sim, dt: number): void {
     if (sim.state[i] !== RETURNING) continue;
     sim.returnT[i] += dt / 1.9;
     const t = sim.returnT[i];
-    if (t <= 0) continue;
+    if (t <= 0) {
+      // pre-vuelo: la arena tiembla, turbulenta, antes de despegar
+      const j = sim.walkClock * 17 + sim.phase01[i] * 37;
+      sim.x[i] = sim.rx[i] + Math.sin(j) * 2.6;
+      sim.y[i] = sim.ry[i] + Math.cos(j * 1.3) * 1.8;
+      continue;
+    }
     const e = 1 - Math.pow(1 - Math.min(1, t), 3);
     const tx = sim.imgX + sim.u[i] * sim.imgW;
     const ty = sim.imgY + sim.v[i] * sim.imgH;
@@ -705,7 +812,12 @@ function settleInstant(sim: Sim): void {
   }
 }
 
-function draw(ctx: CanvasRenderingContext2D, sim: Sim, walkMode = false): void {
+function draw(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  walkMode = false,
+  sprite: SpriteSet | null = null,
+): void {
   const W = sim.cssW;
   const H = sim.cssH;
   ctx.clearRect(0, 0, W, H);
@@ -713,6 +825,13 @@ function draw(ctx: CanvasRenderingContext2D, sim: Sim, walkMode = false): void {
   // suelo sutil
   ctx.fillStyle = 'rgba(255,255,255,0.05)';
   ctx.fillRect(0, sim.floorY + sim.grainSize, W, 1);
+
+  // arena de ceniza: la huella que dejaron las dunas tras el hechizo
+  if (sim.game.ghost) {
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(sim.game.ghost, 0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
 
   const gs = sim.grainSize;
   for (let g = 0; g < sim.buckets.length; g++) {
@@ -757,26 +876,77 @@ function draw(ctx: CanvasRenderingContext2D, sim: Sim, walkMode = false): void {
   }
   ctx.globalAlpha = 1;
 
-  // el Grano
+  // el custodio: sprite pixel con piernitas animadas
   const p = sim.player;
-  const bobY = p.moving ? Math.sin(p.bob) * 1.6 : 0;
-  const halo = (r: number, a: number) => {
-    ctx.globalAlpha = a;
-    ctx.fillStyle = '#f6d9a8';
-    ctx.beginPath();
-    ctx.arc(p.x, p.y + bobY, r, 0, Math.PI * 2);
-    ctx.fill();
-  };
-  halo(13, 0.12);
-  halo(8, 0.28);
-  halo(4.5, 1);
+  const bobY = p.moving ? Math.sin(p.bob) * 1.4 : 0;
+  ctx.globalAlpha = 0.1;
+  ctx.fillStyle = '#f6d9a8';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y + bobY - 8, 20, 0, Math.PI * 2);
+  ctx.fill();
   ctx.globalAlpha = 1;
+  if (sprite) {
+    const scale = 2.6;
+    const w = SPRITE_W * scale;
+    const h = SPRITE_H * scale;
+    const frame = p.moving ? 1 + (Math.floor(p.walkPhase * 2) % 2) : 0;
+    ctx.save();
+    ctx.translate(p.x, p.y + 9 + bobY);
+    if (p.dir < 0) ctx.scale(-1, 1);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(sprite.frames[frame], -w / 2, -h, w, h);
+    ctx.restore();
+  }
 
-  // HUD mínimo
-  const collected = sim.ecos.filter((e) => e.collected).length;
+  // hechizo en curso: turbulencia mágica
+  const g = sim.game;
+  if (g.casting > 0) {
+    const prog = 1 - g.casting / CAST_TIME;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = `rgba(156,232,216,${0.5 * (1 - prog)})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - 10, 20 + prog * W * 0.7, 0, Math.PI * 2);
+    ctx.stroke();
+    for (let k = 0; k < 36; k++) {
+      const a = sim.walkClock * (1.5 + (k % 5) * 0.4) + k * 1.7;
+      const r = 30 + ((k * 53) % Math.round(W * 0.45)) * prog;
+      const sx = p.x + Math.cos(a) * r;
+      const sy = p.y - 10 + Math.sin(a) * r * 0.5 - prog * 60;
+      ctx.fillStyle = k % 3 === 0 ? 'rgba(246,217,168,0.7)' : 'rgba(156,232,216,0.6)';
+      ctx.fillRect(sx, sy, 2.5, 2.5);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // HUD: vida, magia, orbes
+  const bar = (y: number, value: number, color: string, label: string) => {
+    ctx.fillStyle = 'rgba(216,220,232,0.7)';
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(label, 14, y + 6);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(28, y, 110, 6);
+    ctx.fillStyle = color;
+    ctx.fillRect(28, y, 110 * (value / 100), 6);
+  };
+  bar(16, g.hp, '#e87c8c', '♥');
+  bar(30, g.magic, '#9ce8d8', '✦');
   ctx.font = '12px ui-monospace, monospace';
   ctx.fillStyle = 'rgba(216,220,232,0.8)';
-  ctx.fillText(`ecos ${collected}/${sim.ecos.length}`, 14, 22);
-  ctx.fillStyle = 'rgba(216,220,232,0.45)';
-  ctx.fillText('← → caminar', 14, 40);
+  ctx.fillText(`orbes ${g.orbs}/${sim.ecos.length}`, 14, 58);
+  if (g.castDone) {
+    ctx.fillStyle = '#f6d9a8';
+    ctx.fillText('canto restaurado ✦', 14, 76);
+  } else if (g.ghost === null && g.orbs >= sim.ecos.length && g.magic >= 99) {
+    const pulse = 0.55 + 0.45 * Math.sin(sim.walkClock * 4);
+    ctx.fillStyle = `rgba(246,217,168,${pulse})`;
+    ctx.fillText('E — hechizo de reconstrucción', 14, 76);
+  } else if (sim.walkClock < 9) {
+    ctx.fillStyle = 'rgba(216,220,232,0.45)';
+    ctx.fillText('← → caminar', 14, 76);
+  }
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(216,220,232,0.35)';
+  ctx.fillText('nivel 1 · la espiral (fibonacci)', W - 14, 22);
+  ctx.textAlign = 'left';
 }

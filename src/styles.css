@@ -336,6 +336,57 @@ button {
   padding: 4px 12px;
 }
 
+.select-card {
+  max-width: 560px;
+}
+
+.char-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.char-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.char-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-3px);
+}
+
+.char-card img {
+  width: 64px;
+  height: 72px;
+  image-rendering: pixelated;
+}
+
+.char-name {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.char-meta {
+  font-size: 10px;
+  color: var(--dim);
+  text-align: center;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .char-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
 .btn.walk {
   border-color: #9ce8d8;
   color: #9ce8d8;

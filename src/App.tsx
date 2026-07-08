@@ -5,6 +5,7 @@ import { compose, MODE_NAMES, SOLFEGE } from './lib/music';
 import { Landing } from './components/Landing';
 import { SandCanvas } from './components/SandCanvas';
 import { Timeline } from './components/Timeline';
+import { CHARACTERS, spriteDataUrl, type Character } from './lib/sprites';
 import type { AnalyzedImage, Composition, Phase, Role, Track } from './lib/types';
 
 const ROLE_PRIORITY: Role[] = ['pad', 'bass', 'arp', 'pluck', 'bell', 'texture'];
@@ -26,6 +27,8 @@ export default function App() {
   const [walkMode, setWalkMode] = useState(false);
   const [ecos, setEcos] = useState({ collected: 0, total: 0 });
   const [won, setWon] = useState(false);
+  const [character, setCharacter] = useState<Character | null>(null);
+  const [selecting, setSelecting] = useState(false);
 
   // la caminata solo existe sobre las dunas ya formadas
   useEffect(() => {
@@ -289,6 +292,7 @@ export default function App() {
           audio={audio}
           phase={phase}
           walkMode={walkMode}
+          character={character ?? 'lupa'}
           releaseOrder={releaseOrder}
           onGroupRelease={(pi) => {
             releasedRef.current.add(pi);
@@ -303,12 +307,45 @@ export default function App() {
           onEcoProgress={(collected, total) => setEcos({ collected, total })}
           onWin={() => setWon(true)}
         />
+        {selecting && (
+          <div className="win-overlay">
+            <div className="win-card select-card">
+              <span className="win-title">elige a tu custodio</span>
+              <span className="win-sub">
+                cruzarás el Marco para devolverle el Canto a este cuadro
+              </span>
+              <div className="char-grid">
+                {CHARACTERS.map((c) => (
+                  <button
+                    key={c.id}
+                    className="char-card"
+                    onClick={() => {
+                      setCharacter(c.id);
+                      setSelecting(false);
+                      setWalkMode(true);
+                    }}
+                  >
+                    <img src={spriteDataUrl(c.id)} alt={c.name} />
+                    <span className="char-name">{c.name}</span>
+                    <span className="char-meta">
+                      {c.species} · batita {c.flag}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <button className="btn" onClick={() => setSelecting(false)}>
+                mejor luego
+              </button>
+            </div>
+          </div>
+        )}
         {won && (
           <div className="win-overlay">
             <div className="win-card">
-              <span className="win-title">✦ imagen reconstruida</span>
+              <span className="win-title">✦ canto restaurado</span>
               <span className="win-sub">
-                recogiste los {ecos.total} ecos: la foto volvió a formarse y la música es tuya
+                el hechizo de reconstrucción devolvió el color al lienzo; las dunas quedaron
+                como arena de ceniza — la huella de lo que el cuadro perdió y recuperó
               </span>
               <div className="win-actions">
                 <button className="btn" onClick={() => setWon(false)}>
@@ -336,14 +373,18 @@ export default function App() {
         {phase === 'collapsed' && (
           <button
             className={`btn${walkMode ? '' : ' walk'}`}
-            onClick={() => setWalkMode(!walkMode)}
+            onClick={() => {
+              if (walkMode) setWalkMode(false);
+              else if (character) setWalkMode(true);
+              else setSelecting(true);
+            }}
           >
-            {walkMode ? '◫ volver al estudio' : '⬡ caminar las dunas'}
+            {walkMode ? '◫ volver al estudio' : '⬡ entrar al cuadro'}
           </button>
         )}
         {walkMode && (
           <span className="eco-chip">
-            ✦ ecos {ecos.collected}/{ecos.total}
+            ✦ orbes {ecos.collected}/{ecos.total}
           </span>
         )}
         {(phase === 'collapsed' || phase === 'collapsing') && !walkMode && (
