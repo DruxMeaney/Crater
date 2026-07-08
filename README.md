@@ -46,15 +46,19 @@ Suelta un PNG y escúchalo derrumbarse: cada color es un acorde, cada píxel un 
 - Cambia **raíz**, **modo** y **bpm**, o pulsa **⟳ reimaginar** para otra variación de la misma imagen
 - Sin imagen a mano: tres demos procedurales (*Atardecer*, *Nebulosa*, *Vergel*)
 
-## Desarrollo
+## Correr en local
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
+npm run dev      # versión web → http://localhost:5173
+npm run app      # app de escritorio nativa (Electron)
+npm run dist:app # instalador (.dmg / .exe / .AppImage) en release/
 npm run build    # tsc + vite build → dist/
 ```
 
-Stack: Vite · React 18 · TypeScript · Tone.js 15 · Canvas 2D. Sin backend: todo ocurre en tu navegador.
+Stack: Vite · React 18 · TypeScript · Tone.js 15 · Canvas 2D · Electron. Sin backend: todo ocurre en tu máquina.
+
+¿Rumbo a Steam? El plan completo está en [STEAM.md](STEAM.md).
 
 ## Hoja de ruta (modo juego)
 
