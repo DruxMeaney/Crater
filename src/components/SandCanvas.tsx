@@ -13,7 +13,7 @@ interface Props {
   onReformDone: () => void;
 }
 
-const TARGET_GRAINS = 6500;
+const TARGET_GRAINS = 12000;
 const GRAVITY = 1150; // px/s²
 const GROUP_STAGGER = 1.15; // s entre grupos
 const GRAIN_STAGGER = 1.0; // s de dispersión dentro de un grupo
@@ -101,8 +101,14 @@ export function SandCanvas({
       const gv: number[] = [];
       const gg: number[] = [];
       const gs: number[] = [];
+      // con stride entero el conteo puede excederse mucho: descartar el sobrante
+      const estimate = Math.ceil(iw / stride) * Math.ceil(ih / stride);
+      const keepRatio = Math.min(1, (TARGET_GRAINS * 1.1) / estimate);
+      let hash = 0;
       for (let y = 0; y < ih; y += stride) {
         for (let x = 0; x < iw; x += stride) {
+          hash = (hash * 1103515245 + 12345) & 0x7fffffff;
+          if (keepRatio < 1 && hash / 0x7fffffff > keepRatio) continue;
           const idx = y * iw + x;
           const g = groups[idx];
           if (g === -1) continue;

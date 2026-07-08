@@ -1,6 +1,11 @@
 import * as Tone from 'tone';
 import { STEPS, STEPS_PER_BAR, type Composition, type Role, type Track } from './types';
 
+const ROOT_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+// roles decorativos: pueden callar en las vueltas de baja intensidad
+const DECORATIVE: ReadonlySet<Role> = new Set(['arp', 'pluck', 'bell', 'texture']);
+
 // ganancia base por rol (mezcla)
 const ROLE_GAIN: Record<Role, number> = {
   pad: 0.5,
@@ -32,7 +37,7 @@ const ROLE_DELAY: Record<Role, number> = {
 
 interface TrackNodes {
   role: Role;
-  trigger: (track: Track, step: number, time: number) => void;
+  trigger: (track: Track, step: number, time: number, velScale: number, lift: boolean) => void;
   gain: Tone.Gain; // mezcla por rol × mute
   fade: Tone.Gain; // fade del derrumbe
   dispose: () => void;
@@ -44,9 +49,13 @@ export class CraterAudio {
   private comp: Composition | null = null;
   private nodes = new Map<number, TrackNodes>();
   private master: Tone.Gain | null = null;
+  private masterFilter: Tone.Filter | null = null;
+  private breathLfo: Tone.LFO | null = null;
   private limiter: Tone.Limiter | null = null;
   private reverb: Tone.Reverb | null = null;
   private delay: Tone.PingPongDelay | null = null;
+  private drone: Tone.MonoSynth | null = null;
+  private droneGain: Tone.Gain | null = null;
   private repeatId: number | null = null;
   private stepCount = 0;
 
@@ -80,7 +89,26 @@ export class CraterAudio {
   private async doStart(): Promise<void> {
     await Tone.start();
     this.limiter = new Tone.Limiter(-1.5).toDestination();
-    this.master = new Tone.Gain(0.85).connect(this.limiter);
+    // filtro respirante en el master: la mezcla entera se abre y cierra muy despacio
+    this.masterFilter = new Tone.Filter(11000, 'lowpass').connect(this.limiter);
+    this.breathLfo = new Tone.LFO({ frequency: 0.025, min: 5200, max: 14000 });
+    this.breathLfo.connect(this.masterFilter.frequency);
+    this.breathLfo.start();
+    this.master = new Tone.Gain(0.85).connect(this.masterFilter);
+    // drone de sub-bajo: el suelo armónico permanente de la pieza
+    this.droneGain = new Tone.Gain(0).connect(this.master);
+    this.drone = new Tone.MonoSynth({
+      oscillator: { type: 'sine' },
+      envelope: { attack: 6, decay: 0.1, sustain: 1, release: 9 },
+      filterEnvelope: {
+        attack: 5,
+        decay: 0.1,
+        sustain: 1,
+        release: 9,
+        baseFrequency: 110,
+        octaves: 0.6,
+      },
+    }).connect(this.droneGain);
     this.reverb = new Tone.Reverb({ decay: 9, preDelay: 0.04, wet: 1 }).connect(this.master);
     // no esperamos al impulso del reverb: en pestañas ocultas su render por
     // trozos queda estrangulado y bloquearía el arranque; el reverb entra solo
@@ -93,9 +121,11 @@ export class CraterAudio {
   }
 
   setComposition(comp: Composition): void {
+    const rootChanged = this.comp && this.comp.rootPc !== comp.rootPc;
     this.comp = comp;
     Tone.getTransport().bpm.value = comp.bpm;
     if (this.ready) this.buildTracks(comp);
+    if (rootChanged && Tone.getTransport().state === 'started') this.startDrone();
   }
 
   updateTracks(tracks: Track[]): void {
@@ -120,21 +150,32 @@ export class CraterAudio {
       this.repeatId = transport.scheduleRepeat((time) => this.onRepeat(time), '8n');
     }
     transport.start('+0.05');
+    this.startDrone();
   }
 
   pause(): void {
     Tone.getTransport().pause();
+    this.drone?.triggerRelease();
   }
 
   resume(): void {
     Tone.getTransport().start();
+    this.startDrone();
   }
 
   stop(): void {
     const transport = Tone.getTransport();
     transport.stop();
     this.stepCount = 0;
+    this.drone?.triggerRelease();
+    this.droneGain?.gain.rampTo(0, 2);
     for (const n of this.nodes.values()) n.fade.gain.cancelScheduledValues(Tone.now());
+  }
+
+  private startDrone(): void {
+    if (!this.drone || !this.droneGain || !this.comp) return;
+    this.drone.triggerAttack(`${ROOT_NOTES[this.comp.rootPc]}1`);
+    this.droneGain.gain.rampTo(0.14, 10);
   }
 
   setAllFades(v: number): void {
@@ -164,7 +205,11 @@ export class CraterAudio {
     this.disposeTracks();
     this.reverb?.dispose();
     this.delay?.dispose();
+    this.drone?.dispose();
+    this.droneGain?.dispose();
+    this.breathLfo?.dispose();
     this.master?.dispose();
+    this.masterFilter?.dispose();
     this.limiter?.dispose();
     this.ready = false;
     this.startPromise = null;
@@ -175,14 +220,27 @@ export class CraterAudio {
   private onRepeat(time: number): void {
     if (!this.comp) return;
     const step = this.stepCount % STEPS;
+    const loop = Math.floor(this.stepCount / STEPS);
     this.stepCount++;
+
+    // arco de intensidad: la pieza respira en ciclos de 8 vueltas (~2-4 min),
+    // de escasa a plena y de vuelta — forma musical, no loop estático
+    const cycle = (loop % 8) / 8;
+    const intensity = 0.55 + 0.45 * Math.sin(Math.PI * cycle);
+    // en la cresta del ciclo, el arpegio sube una octava
+    const lift = cycle >= 0.375 && cycle < 0.625;
 
     for (const track of this.comp.tracks) {
       if (track.muted || !track.steps[step]) continue;
       const n = this.nodes.get(track.id);
       if (!n) continue;
+      // los roles decorativos callan a veces en las vueltas tenues
+      if (DECORATIVE.has(track.role) && Math.random() > intensity) continue;
+      // humanización: micro-desfase de tiempo y variación de velocidad
+      const t = time + (Math.random() - 0.5) * 0.018;
+      const velScale = (0.82 + Math.random() * 0.24) * (0.72 + 0.28 * intensity);
       try {
-        n.trigger(track, step, time);
+        n.trigger(track, step, t, velScale, lift);
       } catch {
         // un trigger fallido no debe tumbar el transporte
       }
@@ -231,7 +289,11 @@ export class CraterAudio {
 
     switch (role) {
       case 'pad': {
-        const filter = new Tone.Filter(1400, 'lowpass').connect(gain);
+        // chorus lento: ensancha el manto en estéreo
+        const chorus = new Tone.Chorus({ frequency: 0.24, delayTime: 4.5, depth: 0.7, wet: 0.5 })
+          .connect(gain)
+          .start();
+        const filter = new Tone.Filter(1400, 'lowpass').connect(chorus);
         const synth = new Tone.PolySynth(Tone.FMSynth, {
           harmonicity: 1.01,
           modulationIndex: 3.5,
@@ -242,10 +304,15 @@ export class CraterAudio {
         }).connect(filter);
         // 4 notas × '1m' + 6s de release: a 110 bpm coexisten hasta 4 acordes → 16 voces
         synth.maxPolyphony = 24;
-        disposables.push(synth, filter);
-        trigger = (t, step, time) => {
+        disposables.push(synth, filter, chorus);
+        trigger = (t, step, time, velScale) => {
           const bar = Math.floor(step / STEPS_PER_BAR);
-          synth.triggerAttackRelease(comp.chords[bar], '1m', time, t.velocities[step] * 0.55);
+          synth.triggerAttackRelease(
+            comp.chords[bar],
+            '1m',
+            time,
+            t.velocities[step] * 0.55 * velScale,
+          );
         };
         break;
       }
@@ -263,8 +330,13 @@ export class CraterAudio {
           },
         }).connect(gain);
         disposables.push(synth);
-        trigger = (t, step, time) => {
-          synth.triggerAttackRelease(t.pitches[step], '2n', time, t.velocities[step] * 0.9);
+        trigger = (t, step, time, velScale) => {
+          synth.triggerAttackRelease(
+            t.pitches[step],
+            '2n',
+            time,
+            t.velocities[step] * 0.9 * velScale,
+          );
         };
         break;
       }
@@ -275,8 +347,11 @@ export class CraterAudio {
         }).connect(gain);
         synth.maxPolyphony = 12;
         disposables.push(synth);
-        trigger = (t, step, time) => {
-          synth.triggerAttackRelease(t.pitches[step], '8n', time, t.velocities[step]);
+        trigger = (t, step, time, velScale, lift) => {
+          const pitch = lift
+            ? Tone.Frequency(t.pitches[step]).transpose(12).toNote()
+            : t.pitches[step];
+          synth.triggerAttackRelease(pitch, '8n', time, t.velocities[step] * velScale);
         };
         break;
       }
@@ -287,8 +362,8 @@ export class CraterAudio {
           resonance: 0.92,
         }).connect(gain);
         disposables.push(synth);
-        trigger = (t, step, time) => {
-          synth.triggerAttack(t.pitches[step], time);
+        trigger = (t, _step, time) => {
+          synth.triggerAttack(t.pitches[_step], time);
         };
         break;
       }
@@ -302,8 +377,13 @@ export class CraterAudio {
         }).connect(gain);
         synth.maxPolyphony = 8;
         disposables.push(synth);
-        trigger = (t, step, time) => {
-          synth.triggerAttackRelease(t.pitches[step], '1n', time, t.velocities[step] * 0.7);
+        trigger = (t, step, time, velScale) => {
+          synth.triggerAttackRelease(
+            t.pitches[step],
+            '1n',
+            time,
+            t.velocities[step] * 0.7 * velScale,
+          );
         };
         break;
       }
@@ -317,8 +397,8 @@ export class CraterAudio {
           envelope: { attack: 2.5, decay: 1.5, sustain: 0.25, release: 5 },
         }).connect(filter);
         disposables.push(synth, filter, lfo);
-        trigger = (t, step, time) => {
-          synth.triggerAttackRelease('1m', time, t.velocities[step] * 0.5);
+        trigger = (t, step, time, velScale) => {
+          synth.triggerAttackRelease('1m', time, t.velocities[step] * 0.5 * velScale);
         };
         break;
       }
