@@ -60,12 +60,21 @@ Stack: Vite · React 18 · TypeScript · Tone.js 15 · Canvas 2D · Electron. Si
 
 ¿Rumbo a Steam? El plan completo está en [STEAM.md](STEAM.md).
 
-## Hoja de ruta (modo juego)
+## Modo caminata (prototipo jugable)
 
-- **Niveles**: cada nivel es una imagen misteriosa; el objetivo es reconstruir su armonía
-  reordenando pasos con un número limitado de movimientos.
-- **Personaje**: un grano de arena que surfea el playhead; los pasos activos son plataformas.
-- **Puntuación por consonancia**: qué tan cerca quedó tu edición de la armonía "natural" de la imagen.
+Tras derrumbar la imagen, pulsa **⬡ caminar las dunas**:
+
+- Eres **el Grano**: muévete con ← → (o A/D) sobre las dunas que formó tu imagen.
+- **Cada paso suena**: la altura de la duna elige la nota (siempre consonante con la pieza).
+- Enterrados hay **ecos** (✦), uno por color, donde ese color era más denso en la foto.
+  Al recogerlos, los granos de ese color vuelan de regreso y reconstruyen su parte de la imagen.
+- Recoge los 6 y la foto se re-forma completa sobre el cráter. Esa es la victoria.
+
+## Hoja de ruta (juego completo)
+
+- **Niveles**: imágenes misteriosas que se revelan al completarlas; modo campaña.
+- **Puntuación por consonancia** y logros (primer derrumbe, 12 imágenes escuchadas…).
+- **Steam**: ver [STEAM.md](STEAM.md).
 
 ---
 

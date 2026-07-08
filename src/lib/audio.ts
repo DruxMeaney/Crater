@@ -56,6 +56,13 @@ export class CraterAudio {
   private delay: Tone.PingPongDelay | null = null;
   private drone: Tone.MonoSynth | null = null;
   private droneGain: Tone.Gain | null = null;
+  private stepSynth: Tone.PluckSynth | null = null;
+  private stepGain: Tone.Gain | null = null;
+  private ecoSynth: Tone.PolySynth | null = null;
+  private ecoGain: Tone.Gain | null = null;
+  private walkPool: string[] = []; // notas consonantes para los pasos del Grano
+  private lastStepTime = 0; // PluckSynth exige tiempos estrictamente crecientes
+  private extraNodes: Array<{ dispose: () => void }> = [];
   private repeatId: number | null = null;
   private stepCount = 0;
 
@@ -109,10 +116,32 @@ export class CraterAudio {
         octaves: 0.6,
       },
     }).connect(this.droneGain);
+    // sonidos del modo caminata: pasos (cuerda pulsada suave) y ecos (campanas)
+    this.stepGain = new Tone.Gain(0.4).connect(this.master);
+    this.stepSynth = new Tone.PluckSynth({
+      attackNoise: 0.4,
+      dampening: 2600,
+      resonance: 0.85,
+    }).connect(this.stepGain);
+    this.ecoGain = new Tone.Gain(0.5).connect(this.master);
+    this.ecoSynth = new Tone.PolySynth(Tone.FMSynth, {
+      harmonicity: 3.01,
+      modulationIndex: 9,
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.004, decay: 1.4, sustain: 0, release: 3 },
+      modulationEnvelope: { attack: 0.004, decay: 0.8, sustain: 0, release: 2 },
+    }).connect(this.ecoGain);
+    this.ecoSynth.maxPolyphony = 32; // 6 ecos seguidos × 4 notas con colas largas
     this.reverb = new Tone.Reverb({ decay: 9, preDelay: 0.04, wet: 1 }).connect(this.master);
     // no esperamos al impulso del reverb: en pestañas ocultas su render por
     // trozos queda estrangulado y bloquearía el arranque; el reverb entra solo
     void this.reverb.ready.catch(() => {});
+    // colas de reverb para pasos y ecos
+    const stepRev = new Tone.Gain(0.35).connect(this.reverb);
+    this.stepGain.connect(stepRev);
+    const ecoRev = new Tone.Gain(0.8).connect(this.reverb);
+    this.ecoGain.connect(ecoRev);
+    this.extraNodes.push(stepRev, ecoRev);
     this.delay = new Tone.PingPongDelay({ delayTime: '4n.', feedback: 0.35, wet: 1 }).connect(
       this.master,
     );
@@ -124,8 +153,39 @@ export class CraterAudio {
     const rootChanged = this.comp && this.comp.rootPc !== comp.rootPc;
     this.comp = comp;
     Tone.getTransport().bpm.value = comp.bpm;
+    // notas para los pasos: los tonos de la progresión, ordenados y con octava extra
+    const uniq = [...new Set(comp.chords.flat())].sort(
+      (a, b) => Tone.Frequency(a).toMidi() - Tone.Frequency(b).toMidi(),
+    );
+    this.walkPool = uniq.concat(uniq.map((n) => Tone.Frequency(n).transpose(12).toNote()));
     if (this.ready) this.buildTracks(comp);
     if (rootChanged && Tone.getTransport().state === 'started') this.startDrone();
+  }
+
+  // paso del Grano: la altura de la duna (0-1) elige la nota — dunas altas, notas altas
+  playStep(height01: number): void {
+    if (!this.ready || !this.stepSynth || this.walkPool.length === 0) return;
+    const len = this.walkPool.length;
+    const base = Math.round(Math.max(0, Math.min(1, height01)) * (len - 1));
+    const idx = Math.min(len - 1, base + (Math.random() < 0.25 ? 1 : 0));
+    const time = Math.max(Tone.now(), this.lastStepTime + 0.035);
+    this.lastStepTime = time;
+    try {
+      this.stepSynth.triggerAttack(this.walkPool[idx], time);
+    } catch {
+      // un paso que no suena no debe romper la caminata
+    }
+  }
+
+  // eco recogido: arpegio de campanas con el acorde asociado a esa pista
+  playEco(trackId: number): void {
+    if (!this.ready || !this.ecoSynth || !this.comp) return;
+    const chord = this.comp.chords[trackId % this.comp.chords.length];
+    const now = Tone.now();
+    chord.forEach((n, i) => {
+      const note = Tone.Frequency(n).transpose(12).toNote();
+      this.ecoSynth?.triggerAttackRelease(note, '2n', now + i * 0.09, 0.55);
+    });
   }
 
   updateTracks(tracks: Track[]): void {
@@ -207,6 +267,12 @@ export class CraterAudio {
     this.delay?.dispose();
     this.drone?.dispose();
     this.droneGain?.dispose();
+    this.stepSynth?.dispose();
+    this.stepGain?.dispose();
+    this.ecoSynth?.dispose();
+    this.ecoGain?.dispose();
+    for (const n of this.extraNodes) n.dispose();
+    this.extraNodes = [];
     this.breathLfo?.dispose();
     this.master?.dispose();
     this.masterFilter?.dispose();

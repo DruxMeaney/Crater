@@ -23,7 +23,8 @@ para convertir eso en un lanzamiento en Steam.
 | Empaquetado instalable (dmg / nsis / AppImage) | ✅ `npm run dist:app` |
 | Prueba de humo para CI | ✅ `npm run app:smoke` |
 | Steamworks (logros, overlay, rich presence) | ⬜ pendiente |
-| Modo juego (niveles, personaje) | ⬜ pendiente — ver README |
+| Modo caminata: el Grano, pasos sonoros, ecos, reconstrucción | ✅ prototipo jugable |
+| Modo juego completo (niveles, campaña, puntuación) | ⬜ pendiente — ver README |
 
 ## Pasos hacia el lanzamiento
 

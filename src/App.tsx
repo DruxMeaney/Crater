@@ -23,6 +23,17 @@ export default function App() {
   const [bpm, setBpm] = useState(70);
   const [error, setError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [walkMode, setWalkMode] = useState(false);
+  const [ecos, setEcos] = useState({ collected: 0, total: 0 });
+  const [won, setWon] = useState(false);
+
+  // la caminata solo existe sobre las dunas ya formadas
+  useEffect(() => {
+    if (phase !== 'collapsed') {
+      setWalkMode(false);
+      setWon(false);
+    }
+  }, [phase]);
 
   // refs para leer el estado vigente tras un await (evita cierres obsoletos)
   const compRef = useRef(comp);
@@ -272,28 +283,70 @@ export default function App() {
         </div>
       </header>
 
-      <SandCanvas
-        analyzed={analyzed}
-        audio={audio}
-        phase={phase}
-        releaseOrder={releaseOrder}
-        onGroupRelease={(pi) => {
-          releasedRef.current.add(pi);
-          audio.fadeInTrack(pi, 2.4);
-        }}
-        onCollapseDone={() => setPhase('collapsed')}
-        onReformDone={() => {
-          audio.stop();
-          setPlaying(false);
-          setPhase('intact');
-        }}
-      />
+      <div className="stage">
+        <SandCanvas
+          analyzed={analyzed}
+          audio={audio}
+          phase={phase}
+          walkMode={walkMode}
+          releaseOrder={releaseOrder}
+          onGroupRelease={(pi) => {
+            releasedRef.current.add(pi);
+            audio.fadeInTrack(pi, 2.4);
+          }}
+          onCollapseDone={() => setPhase('collapsed')}
+          onReformDone={() => {
+            audio.stop();
+            setPlaying(false);
+            setPhase('intact');
+          }}
+          onEcoProgress={(collected, total) => setEcos({ collected, total })}
+          onWin={() => setWon(true)}
+        />
+        {won && (
+          <div className="win-overlay">
+            <div className="win-card">
+              <span className="win-title">✦ imagen reconstruida</span>
+              <span className="win-sub">
+                recogiste los {ecos.total} ecos: la foto volvió a formarse y la música es tuya
+              </span>
+              <div className="win-actions">
+                <button className="btn" onClick={() => setWon(false)}>
+                  seguir caminando
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    setWon(false);
+                    setWalkMode(false);
+                  }}
+                >
+                  volver al estudio
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="transport">
         <button className="btn primary" onClick={() => void togglePlay()}>
           {phase === 'intact' ? '◈ derrumbar' : playing ? '❚❚ pausa' : '▶ reanudar'}
         </button>
-        {(phase === 'collapsed' || phase === 'collapsing') && (
+        {phase === 'collapsed' && (
+          <button
+            className={`btn${walkMode ? '' : ' walk'}`}
+            onClick={() => setWalkMode(!walkMode)}
+          >
+            {walkMode ? '◫ volver al estudio' : '⬡ caminar las dunas'}
+          </button>
+        )}
+        {walkMode && (
+          <span className="eco-chip">
+            ✦ ecos {ecos.collected}/{ecos.total}
+          </span>
+        )}
+        {(phase === 'collapsed' || phase === 'collapsing') && !walkMode && (
           <button className="btn" onClick={reform}>
             ◇ reformar imagen
           </button>
@@ -308,13 +361,15 @@ export default function App() {
         </div>
       </div>
 
-      <Timeline
-        tracks={tracks}
-        currentStep={currentStep}
-        playing={playing}
-        onToggleStep={onToggleStep}
-        onToggleMute={onToggleMute}
-      />
+      {!walkMode && (
+        <Timeline
+          tracks={tracks}
+          currentStep={currentStep}
+          playing={playing}
+          onToggleStep={onToggleStep}
+          onToggleMute={onToggleMute}
+        />
+      )}
     </div>
   );
 }

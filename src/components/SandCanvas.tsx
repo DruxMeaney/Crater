@@ -7,10 +7,13 @@ interface Props {
   analyzed: AnalyzedImage;
   audio: CraterAudio;
   phase: Phase;
+  walkMode: boolean; // modo caminata: el Grano recorre las dunas
   releaseOrder: number[]; // índices de paleta en orden de derrumbe
   onGroupRelease: (paletteIndex: number) => void;
   onCollapseDone: () => void;
   onReformDone: () => void;
+  onEcoProgress: (collected: number, total: number) => void;
+  onWin: () => void;
 }
 
 const TARGET_GRAINS = 12000;
@@ -23,6 +26,29 @@ const REFORM_TIME = 1.3; // s
 const INTACT = 0;
 const FALLING = 1;
 const SETTLED = 2;
+const RETURNING = 3; // vuela de vuelta a la imagen (eco recogido)
+
+const WALK_SPEED = 150; // px/s
+const STEP_EVERY = 30; // px caminados entre pasos sonoros
+const ECO_RADIUS = 18; // px para recoger un eco
+
+interface Eco {
+  u: number; // posición horizontal normalizada (columna pico de su color)
+  group: number;
+  collected: boolean;
+  x: number;
+  y: number;
+}
+
+interface Player {
+  x: number;
+  y: number;
+  dir: number;
+  moving: boolean;
+  stepDist: number;
+  bob: number;
+  trail: Array<{ x: number; y: number; age: number }>;
+}
 
 interface Sim {
   n: number;
@@ -54,23 +80,37 @@ interface Sim {
   clock: number; // reloj de simulación en s (avanza solo en collapse/reform)
   flash: Float32Array; // brillo por grupo al disparar nota
   styles: string[][]; // [grupo][sombra + flash]
+  // modo caminata
+  player: Player;
+  ecos: Eco[];
+  rx: Float32Array; // origen del vuelo de retorno por grano
+  ry: Float32Array;
+  returnT: Float32Array;
+  walkClock: number;
 }
 
 export function SandCanvas({
   analyzed,
   audio,
   phase,
+  walkMode,
   releaseOrder,
   onGroupRelease,
   onCollapseDone,
   onReformDone,
+  onEcoProgress,
+  onWin,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const simRef = useRef<Sim | null>(null);
   const phaseRef = useRef<Phase>(phase);
-  const callbacksRef = useRef({ onGroupRelease, onCollapseDone, onReformDone });
-  callbacksRef.current = { onGroupRelease, onCollapseDone, onReformDone };
+  const walkRef = useRef(walkMode);
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
+  const keysRef = useRef({ left: false, right: false });
+  const callbacksRef = useRef({ onGroupRelease, onCollapseDone, onReformDone, onEcoProgress, onWin });
+  callbacksRef.current = { onGroupRelease, onCollapseDone, onReformDone, onEcoProgress, onWin };
 
   // --- inicialización de granos al cambiar la imagen ---
   useEffect(() => {
@@ -138,6 +178,36 @@ export function SandCanvas({
       const floorY = H - 6;
       const numCols = Math.ceil(W / grainSize);
 
+      // ecos: uno por color, enterrado donde ese color tenía más densidad
+      const colCounts = palette.map(() => new Array<number>(32).fill(0));
+      for (let y = 0; y < ih; y++) {
+        for (let x = 0; x < iw; x++) {
+          const g = groups[y * iw + x];
+          if (g >= 0) colCounts[g][Math.min(31, Math.floor((x / iw) * 32))]++;
+        }
+      }
+      const ecos: Eco[] = palette.map((_, g) => {
+        let peak = 0;
+        for (let c = 1; c < 32; c++) if (colCounts[g][c] > colCounts[g][peak]) peak = c;
+        const u = (peak + 0.5) / 32;
+        return { u, group: g, collected: false, x: 0, y: floorY - 20 };
+      });
+      // separación mínima entre ecos (varios colores pueden picar en la misma columna)
+      const sorted = [...ecos].sort((a, b) => a.u - b.u);
+      const minGap = 0.09;
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].u - sorted[i - 1].u < minGap) sorted[i].u = sorted[i - 1].u + minGap;
+      }
+      const overflow = sorted[sorted.length - 1].u - 0.97;
+      if (overflow > 0) for (const e of sorted) e.u -= overflow;
+      for (let i = sorted.length - 2; i >= 0; i--) {
+        if (sorted[i + 1].u - sorted[i].u < minGap) {
+          sorted[i].u = Math.max(0.03, sorted[i + 1].u - minGap);
+        }
+      }
+      // los ecos se reparten por todo el campo de dunas, no solo bajo la imagen
+      for (const e of ecos) e.x = W * (0.05 + 0.9 * e.u);
+
       const sim: Sim = {
         n,
         u: new Float32Array(gu),
@@ -167,6 +237,20 @@ export function SandCanvas({
         reformFrom: null,
         clock: 0,
         flash: new Float32Array(palette.length),
+        player: {
+          x: W * 0.12,
+          y: floorY - 20,
+          dir: 1,
+          moving: false,
+          stepDist: 0,
+          bob: 0,
+          trail: [],
+        },
+        ecos,
+        rx: new Float32Array(n),
+        ry: new Float32Array(n),
+        returnT: new Float32Array(n),
+        walkClock: 0,
         styles: palette.map((p) => [
           shade(p.hex, 0.72),
           p.hex,
@@ -206,6 +290,13 @@ export function SandCanvas({
       next.releaseAt.set(prev.releaseAt);
       next.released.set(prev.released);
       next.clock = prev.clock;
+      next.walkClock = prev.walkClock;
+      next.player = {
+        ...prev.player,
+        x: prev.player.x * (next.cssW / Math.max(1, prev.cssW)),
+        trail: [],
+      };
+      next.ecos.forEach((e, i) => (e.collected = prev.ecos[i]?.collected ?? false));
       if (phaseRef.current === 'collapsed' || phaseRef.current === 'collapsing') {
         if (next.n === prev.n) resettleFrom(prev, next);
         else settleInstant(next);
@@ -256,6 +347,44 @@ export function SandCanvas({
     });
   }, [audio]);
 
+  // --- modo caminata: entrada/salida y teclado ---
+  useEffect(() => {
+    walkRef.current = walkMode;
+    const sim = simRef.current;
+    if (walkMode && sim) {
+      sim.player.x = sim.cssW * 0.12;
+      sim.player.trail = [];
+      const total = sim.ecos.length;
+      const collected = sim.ecos.filter((e) => e.collected).length;
+      callbacksRef.current.onEcoProgress(collected, total);
+    }
+    if (!walkMode) {
+      keysRef.current.left = false;
+      keysRef.current.right = false;
+      return;
+    }
+    const down = (e: KeyboardEvent) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+        keysRef.current.left = true;
+        e.preventDefault();
+      }
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+        keysRef.current.right = true;
+        e.preventDefault();
+      }
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') keysRef.current.left = false;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') keysRef.current.right = false;
+    };
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+    };
+  }, [walkMode]);
+
   // --- bucle de animación ---
   useEffect(() => {
     let raf = 0;
@@ -274,10 +403,17 @@ export function SandCanvas({
       const ph = phaseRef.current;
       if (ph === 'collapsing') stepCollapse(sim, dt, callbacksRef.current);
       else if (ph === 'reforming') stepReform(sim, dt, callbacksRef.current);
+      else if (ph === 'collapsed') {
+        sim.walkClock += dt;
+        stepReturning(sim, dt);
+        if (walkRef.current) {
+          stepWalk(sim, dt, keysRef.current, audioRef.current, callbacksRef.current);
+        }
+      }
 
       for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
 
-      draw(ctx, sim);
+      draw(ctx, sim, walkRef.current);
     };
     raf = requestAnimationFrame(tick);
 
@@ -292,9 +428,16 @@ export function SandCanvas({
           const ph = phaseRef.current;
           if (ph === 'collapsing') stepCollapse(sim, dt, callbacksRef.current);
           else if (ph === 'reforming') stepReform(sim, dt, callbacksRef.current);
+          else if (ph === 'collapsed') {
+            sim.walkClock += dt;
+            stepReturning(sim, dt);
+            if (walkRef.current) {
+              stepWalk(sim, dt, keysRef.current, audioRef.current, callbacksRef.current);
+            }
+          }
           for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
         }
-        draw(ctx, sim);
+        draw(ctx, sim, walkRef.current);
         return {
           ph: phaseRef.current,
           clock: sim.clock,
@@ -302,7 +445,15 @@ export function SandCanvas({
           falling: sim.state.filter((s) => s === 1).length,
           settled: sim.state.filter((s) => s === 2).length,
           intact: sim.state.filter((s) => s === 0).length,
+          returning: sim.state.filter((s) => s === 3).length,
+          walk: walkRef.current,
+          player: { x: sim.player.x, y: sim.player.y },
+          ecos: sim.ecos.map((e) => ({ x: Math.round(e.x), collected: e.collected })),
         };
+      };
+      (window as unknown as Record<string, unknown>).__craterTeleport = (x: number) => {
+        const sim = simRef.current;
+        if (sim) sim.player.x = x;
       };
     }
 
@@ -398,6 +549,88 @@ function rollTo(sim: Sim, col: number): number {
   return c;
 }
 
+// altura de la pila bajo x, suavizada con los vecinos
+function groundHeightAt(sim: Sim, x: number): number {
+  const col = Math.min(sim.numCols - 1, Math.max(0, Math.floor(x / sim.grainSize)));
+  const a = sim.pileH[Math.max(0, col - 1)];
+  const b = sim.pileH[col];
+  const c = sim.pileH[Math.min(sim.numCols - 1, col + 1)];
+  return (a + b + c) / 3;
+}
+
+function stepWalk(
+  sim: Sim,
+  dt: number,
+  keys: { left: boolean; right: boolean },
+  audio: { playStep: (h: number) => void; playEco: (g: number) => void },
+  cb: { onEcoProgress: (c: number, t: number) => void; onWin: () => void },
+): void {
+  const p = sim.player;
+  const vx = (keys.right ? WALK_SPEED : 0) - (keys.left ? WALK_SPEED : 0);
+  p.moving = vx !== 0;
+  if (p.moving) {
+    p.dir = vx > 0 ? 1 : -1;
+    p.x = Math.max(10, Math.min(sim.cssW - 10, p.x + vx * dt));
+    p.bob += dt * 11;
+    p.stepDist += Math.abs(vx) * dt;
+  }
+
+  const h = groundHeightAt(sim, p.x);
+  const targetY = sim.floorY - h - 7;
+  p.y += (targetY - p.y) * Math.min(1, 14 * dt);
+
+  if (p.stepDist >= STEP_EVERY) {
+    p.stepDist = 0;
+    let maxPile = 1;
+    for (let c = 0; c < sim.numCols; c++) if (sim.pileH[c] > maxPile) maxPile = sim.pileH[c];
+    audio.playStep(h / maxPile);
+    p.trail.push({ x: p.x, y: p.y + 5, age: 0 });
+    if (p.trail.length > 7) p.trail.shift();
+  }
+  for (const t of p.trail) t.age += dt;
+
+  // recoger ecos (solo caminando: nada de premios por quedarse quieto)
+  for (const eco of sim.ecos) {
+    eco.y = sim.floorY - groundHeightAt(sim, eco.x) - 14;
+    if (eco.collected || !p.moving || Math.abs(p.x - eco.x) > ECO_RADIUS) continue;
+    eco.collected = true;
+    audio.playEco(eco.group);
+    // los granos de ese color emprenden el vuelo de regreso a la imagen
+    let k = 0;
+    for (let i = 0; i < sim.n; i++) {
+      if (sim.group[i] !== eco.group || sim.state[i] !== SETTLED) continue;
+      sim.state[i] = RETURNING;
+      sim.rx[i] = sim.x[i];
+      sim.ry[i] = sim.y[i];
+      sim.returnT[i] = -(k % 60) * 0.014; // el enjambre despega escalonado
+      k++;
+    }
+    const collected = sim.ecos.filter((e) => e.collected).length;
+    cb.onEcoProgress(collected, sim.ecos.length);
+    if (collected === sim.ecos.length) cb.onWin();
+  }
+}
+
+function stepReturning(sim: Sim, dt: number): void {
+  for (let i = 0; i < sim.n; i++) {
+    if (sim.state[i] !== RETURNING) continue;
+    sim.returnT[i] += dt / 1.9;
+    const t = sim.returnT[i];
+    if (t <= 0) continue;
+    const e = 1 - Math.pow(1 - Math.min(1, t), 3);
+    const tx = sim.imgX + sim.u[i] * sim.imgW;
+    const ty = sim.imgY + sim.v[i] * sim.imgH;
+    const sway = Math.sin(t * 7 + sim.phase01[i] * 6.28) * 14 * (1 - e);
+    sim.x[i] = sim.rx[i] + (tx - sim.rx[i]) * e + sway;
+    sim.y[i] = sim.ry[i] + (ty - sim.ry[i]) * e;
+    if (t >= 1) {
+      sim.state[i] = INTACT;
+      sim.x[i] = tx;
+      sim.y[i] = ty;
+    }
+  }
+}
+
 function stepReform(sim: Sim, dt: number, cb: { onReformDone: () => void }): void {
   sim.clock += dt;
   const from = sim.reformFrom;
@@ -445,6 +678,12 @@ function resettleFrom(prev: Sim, next: Sim): void {
       next.y[i] = Math.min(prev.y[i] * sy, next.floorY - 1);
       next.vx[i] = prev.vx[i];
       next.vy[i] = prev.vy[i];
+    } else if (st === RETURNING) {
+      next.rx[i] = prev.rx[i] * sx;
+      next.ry[i] = prev.ry[i] * sy;
+      next.returnT[i] = prev.returnT[i];
+      next.x[i] = prev.x[i] * sx;
+      next.y[i] = prev.y[i] * sy;
     }
     // INTACT: buildSim ya lo colocó en su posición dentro de la imagen
   }
@@ -466,7 +705,7 @@ function settleInstant(sim: Sim): void {
   }
 }
 
-function draw(ctx: CanvasRenderingContext2D, sim: Sim): void {
+function draw(ctx: CanvasRenderingContext2D, sim: Sim, walkMode = false): void {
   const W = sim.cssW;
   const H = sim.cssH;
   ctx.clearRect(0, 0, W, H);
@@ -488,4 +727,56 @@ function draw(ctx: CanvasRenderingContext2D, sim: Sim): void {
       }
     }
   }
+
+  if (!walkMode) return;
+
+  // ecos sin recoger: diamante pulsante con haz de luz
+  for (let e = 0; e < sim.ecos.length; e++) {
+    const eco = sim.ecos[e];
+    if (eco.collected) continue;
+    const pulse = 0.55 + 0.35 * Math.sin(sim.walkClock * 3 + e * 1.7);
+    ctx.fillStyle = 'rgba(156,232,216,0.07)';
+    ctx.fillRect(eco.x - 2, sim.imgY, 4, Math.max(0, eco.y - sim.imgY));
+    ctx.save();
+    ctx.translate(eco.x, eco.y);
+    ctx.rotate(Math.PI / 4);
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#9ce8d8';
+    ctx.fillRect(-5, -5, 10, 10);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // estela de pasos
+  for (const t of sim.player.trail) {
+    const a = Math.max(0, 0.5 - t.age * 0.25);
+    if (a <= 0) continue;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#f6d9a8';
+    ctx.fillRect(t.x - 1, t.y, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+
+  // el Grano
+  const p = sim.player;
+  const bobY = p.moving ? Math.sin(p.bob) * 1.6 : 0;
+  const halo = (r: number, a: number) => {
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#f6d9a8';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y + bobY, r, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  halo(13, 0.12);
+  halo(8, 0.28);
+  halo(4.5, 1);
+  ctx.globalAlpha = 1;
+
+  // HUD mínimo
+  const collected = sim.ecos.filter((e) => e.collected).length;
+  ctx.font = '12px ui-monospace, monospace';
+  ctx.fillStyle = 'rgba(216,220,232,0.8)';
+  ctx.fillText(`ecos ${collected}/${sim.ecos.length}`, 14, 22);
+  ctx.fillStyle = 'rgba(216,220,232,0.45)';
+  ctx.fillText('← → caminar', 14, 40);
 }
