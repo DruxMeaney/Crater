@@ -177,6 +177,53 @@ export class CraterAudio {
     }
   }
 
+  // brinco: dos notas rápidas ascendentes del pool
+  playJump(): void {
+    if (!this.ready || !this.stepSynth || this.walkPool.length === 0) return;
+    const len = this.walkPool.length;
+    const t0 = Math.max(Tone.now(), this.lastStepTime + 0.035);
+    this.lastStepTime = t0 + 0.07;
+    try {
+      this.stepSynth.triggerAttack(this.walkPool[Math.floor(len * 0.5)], t0);
+      this.stepSynth.triggerAttack(this.walkPool[Math.min(len - 1, Math.floor(len * 0.75))], t0 + 0.07);
+    } catch {
+      // silencio inofensivo
+    }
+  }
+
+  // piedra de canto: una nota del acorde del cuadro (0 = raíz, 1 = tercera, 2 = quinta)
+  playStone(noteIdx: number): void {
+    if (!this.ready || !this.ecoSynth || !this.comp) return;
+    const chord = this.comp.chords[0];
+    const note = chord[Math.min(chord.length - 1, noteIdx)];
+    this.ecoSynth.triggerAttackRelease(note, '2n', Tone.now(), 0.5);
+  }
+
+  // orden equivocado: golpe grave y sordo
+  playThud(): void {
+    if (!this.ready || !this.stepSynth || !this.comp) return;
+    const time = Math.max(Tone.now(), this.lastStepTime + 0.035);
+    this.lastStepTime = time;
+    try {
+      this.stepSynth.triggerAttack(`${ROOT_NOTES[this.comp.rootPc]}2`, time);
+    } catch {
+      // silencio inofensivo
+    }
+  }
+
+  // cruzar el Marco: glissando ascendente + oleaje del drone
+  playEnter(): void {
+    if (!this.ready || !this.ecoSynth || this.walkPool.length === 0) return;
+    const now = Tone.now();
+    const steps = Math.min(5, this.walkPool.length);
+    for (let i = 0; i < steps; i++) {
+      const idx = Math.floor((i / steps) * this.walkPool.length);
+      this.ecoSynth.triggerAttackRelease(this.walkPool[idx], '4n', now + i * 0.06, 0.3);
+    }
+    this.droneGain?.gain.rampTo(0.24, 0.8);
+    this.droneGain?.gain.rampTo(0.14, 3, Tone.now() + 1.2);
+  }
+
   // hechizo de reconstrucción: cascada de los 4 acordes en dos octavas + oleaje del drone
   playCast(): void {
     if (!this.ready || !this.ecoSynth || !this.comp) return;

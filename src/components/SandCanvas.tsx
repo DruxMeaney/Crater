@@ -36,9 +36,10 @@ const STEP_EVERY = 30; // px caminados entre pasos sonoros
 const ECO_RADIUS = 18; // px para recoger un eco
 
 interface Eco {
-  u: number; // posición horizontal normalizada (columna pico de su color)
+  u: number; // posición horizontal normalizada (sección áurea)
   group: number;
   collected: boolean;
+  hover: boolean; // flota: hay que saltar para alcanzarlo
   x: number;
   y: number;
 }
@@ -46,12 +47,32 @@ interface Eco {
 interface Player {
   x: number;
   y: number;
+  vy: number;
+  onGround: boolean;
   dir: number;
   moving: boolean;
   stepDist: number;
   bob: number;
   walkPhase: number; // anima las piernitas
   trail: Array<{ x: number; y: number; age: number }>;
+}
+
+const JUMP_VEL = -340;
+const FALL_GRAVITY = 980;
+
+// piedra de canto del acertijo: písalas de grave a agudo para abrir la Puerta
+interface Stone {
+  u: number;
+  x: number;
+  note: number; // 0 raíz, 1 tercera, 2 quinta
+  lit: boolean;
+}
+
+interface Gate {
+  u: number;
+  x: number;
+  open: boolean;
+  anim: number; // chispas al abrirse
 }
 
 // estado del juego dentro del nivel
@@ -62,6 +83,9 @@ interface GameState {
   casting: number; // segundos restantes del hechizo (0 = inactivo)
   castDone: boolean;
   ghost: HTMLCanvasElement | null; // arena de ceniza: la huella de las dunas
+  stoneSeq: number; // progreso del acertijo (0..3)
+  lastZone: number; // piedra sobre la que ya estamos parados (-1 = ninguna)
+  enterAnim: number; // segundos restantes de la entrada por el Marco
 }
 
 interface Sim {
@@ -103,6 +127,8 @@ interface Sim {
   walkClock: number;
   targetH: Float32Array; // perfil Fibonacci que la arena debe rellenar
   game: GameState;
+  gate: Gate;
+  stones: Stone[];
 }
 
 export function SandCanvas({
@@ -125,7 +151,7 @@ export function SandCanvas({
   const walkRef = useRef(walkMode);
   const audioRef = useRef(audio);
   audioRef.current = audio;
-  const keysRef = useRef({ left: false, right: false, cast: false });
+  const keysRef = useRef({ left: false, right: false, cast: false, jump: false });
   const spriteRef = useRef<SpriteSet | null>(null);
 
   useEffect(() => {
@@ -201,19 +227,37 @@ export function SandCanvas({
       const numCols = Math.ceil(W / grainSize);
 
       // orbes de canto: tres, en las secciones áureas del mapa (1/φ³, 1/φ², 1/φ),
-      // asignados a los tres colores de mayor cobertura
+      // asignados a los tres colores de mayor cobertura; el segundo flota (hay
+      // que saltar) y el tercero está tras la Puerta de Canto
       const orbCount = Math.min(3, palette.length);
       const ecos: Eco[] = GOLDEN_SECTIONS.slice(0, orbCount).map((u, g) => ({
         u,
         group: g,
         collected: false,
+        hover: g === 1,
         x: W * (0.05 + 0.9 * u),
         y: floorY - 20,
       }));
 
+      // la Puerta de Canto bloquea el último orbe; las piedras la abren
+      const gate: Gate = { u: 0.53, x: W * (0.05 + 0.9 * 0.53), open: false, anim: 0 };
+      // base 0.425: la primera piedra queda fuera de la zona del orbe flotante
+      const stoneNotes = [1, 0, 2]; // desorden espacial: el oído es la llave
+      const stones: Stone[] = stoneNotes.map((note, i) => ({
+        u: 0.425 + i * 0.042,
+        x: W * (0.05 + 0.9 * (0.425 + i * 0.042)),
+        note,
+        lit: false,
+      }));
+
       // perfil Fibonacci: la arena disponible rellenará esta silueta
-      // (cada grano asentado suma grainSize*0.82 px a la altura de su columna)
-      const targetH = scaleProfileToArea(fibonacciProfile(numCols, n), n * grainSize * 0.82);
+      // (cada grano asentado suma grainSize*0.82 px a la altura de su columna;
+      // el tope evita dunas más altas que la pantalla en lienzos pequeños)
+      const targetH = scaleProfileToArea(
+        fibonacciProfile(numCols, n),
+        n * grainSize * 0.82,
+        H * 0.52,
+      );
 
       const sim: Sim = {
         n,
@@ -247,6 +291,8 @@ export function SandCanvas({
         player: {
           x: W * 0.12,
           y: floorY - 20,
+          vy: 0,
+          onGround: false,
           dir: 1,
           moving: false,
           stepDist: 0,
@@ -260,7 +306,19 @@ export function SandCanvas({
         returnT: new Float32Array(n),
         walkClock: 0,
         targetH,
-        game: { orbs: 0, magic: 0, hp: 100, casting: 0, castDone: false, ghost: null },
+        game: {
+          orbs: 0,
+          magic: 0,
+          hp: 100,
+          casting: 0,
+          castDone: false,
+          ghost: null,
+          stoneSeq: 0,
+          lastZone: -1,
+          enterAnim: 0,
+        },
+        gate,
+        stones,
         styles: palette.map((p) => [
           shade(p.hex, 0.72),
           p.hex,
@@ -308,6 +366,22 @@ export function SandCanvas({
       };
       next.ecos.forEach((e, i) => (e.collected = prev.ecos[i]?.collected ?? false));
       next.game = { ...prev.game };
+      next.gate.open = prev.gate.open;
+      next.stones.forEach((s, i) => (s.lit = prev.stones[i]?.lit ?? false));
+      // evitar pisadas fantasma tras el reescalado: la zona bajo el jugador
+      // se recalcula sin disparar el acertijo
+      {
+        let z = -1;
+        let best = 14;
+        for (let s = 0; s < next.stones.length; s++) {
+          const d = Math.abs(next.player.x - next.stones[s].x);
+          if (d < best) {
+            best = d;
+            z = s;
+          }
+        }
+        next.game.lastZone = z;
+      }
       if (phaseRef.current === 'collapsed' || phaseRef.current === 'collapsing') {
         if (next.n === prev.n) resettleFrom(prev, next);
         else settleInstant(next);
@@ -339,6 +413,22 @@ export function SandCanvas({
       releaseOrder.forEach((paletteIdx, orderIdx) => {
         sim.releaseAt[paletteIdx] = 0.35 + orderIdx * GROUP_STAGGER;
       });
+      // cada derrumbe reinicia el nivel completo: acertijo, orbes y hechizo
+      sim.game = {
+        orbs: 0,
+        magic: 0,
+        hp: 100,
+        casting: 0,
+        castDone: false,
+        ghost: null,
+        stoneSeq: 0,
+        lastZone: -1,
+        enterAnim: 0,
+      };
+      sim.gate.open = false;
+      sim.gate.anim = 0;
+      for (const s of sim.stones) s.lit = false;
+      for (const e of sim.ecos) e.collected = false;
     }
 
     if (phase === 'reforming' && prev !== 'reforming') {
@@ -365,12 +455,15 @@ export function SandCanvas({
     if (walkMode && sim) {
       sim.player.x = sim.cssW * 0.12;
       sim.player.trail = [];
+      sim.game.enterAnim = 1.4; // cruzar el Marco: la cámara se hunde en el lienzo
+      audioRef.current.playEnter();
       callbacksRef.current.onEcoProgress(sim.game.orbs, sim.ecos.length);
     }
     if (!walkMode) {
       keysRef.current.left = false;
       keysRef.current.right = false;
       keysRef.current.cast = false;
+      keysRef.current.jump = false;
       return;
     }
     const down = (e: KeyboardEvent) => {
@@ -384,6 +477,10 @@ export function SandCanvas({
       }
       if (e.code === 'KeyE') {
         keysRef.current.cast = true;
+        e.preventDefault();
+      }
+      if (e.code === 'ArrowUp' || e.code === 'KeyW') {
+        keysRef.current.jump = true;
         e.preventDefault();
       }
     };
@@ -462,8 +559,12 @@ export function SandCanvas({
           returning: sim.state.filter((s) => s === 3).length,
           walk: walkRef.current,
           player: { x: sim.player.x, y: sim.player.y },
-          ecos: sim.ecos.map((e) => ({ x: Math.round(e.x), collected: e.collected })),
+          ecos: sim.ecos.map((e) => ({ x: Math.round(e.x), collected: e.collected, hover: e.hover })),
           game: { ...sim.game, ghost: sim.game.ghost !== null },
+          gate: { x: Math.round(sim.gate.x), open: sim.gate.open },
+          stones: sim.stones.map((s) => ({ x: Math.round(s.x), note: s.note, lit: s.lit })),
+          onGround: sim.player.onGround,
+          vy: Math.round(sim.player.vy),
         };
       };
       (window as unknown as Record<string, unknown>).__craterTeleport = (x: number) => {
@@ -603,15 +704,27 @@ function groundHeightAt(sim: Sim, x: number): number {
 
 const CAST_TIME = 3.4; // duración del hechizo de reconstrucción
 
+interface WalkAudio {
+  playStep: (h: number) => void;
+  playEco: (g: number) => void;
+  playCast: () => void;
+  playJump: () => void;
+  playStone: (n: number) => void;
+  playThud: () => void;
+}
+
 function stepWalk(
   sim: Sim,
   dt: number,
-  keys: { left: boolean; right: boolean; cast: boolean },
-  audio: { playStep: (h: number) => void; playEco: (g: number) => void; playCast: () => void },
+  keys: { left: boolean; right: boolean; cast: boolean; jump: boolean },
+  audio: WalkAudio,
   cb: { onEcoProgress: (c: number, t: number) => void; onWin: () => void },
 ): void {
   const p = sim.player;
   const g = sim.game;
+  if (g.enterAnim > 0) g.enterAnim = Math.max(0, g.enterAnim - dt);
+
+  const prevX = p.x;
   const vx = (keys.right ? WALK_SPEED : 0) - (keys.left ? WALK_SPEED : 0);
   p.moving = vx !== 0;
   if (p.moving) {
@@ -619,12 +732,46 @@ function stepWalk(
     p.x = Math.max(10, Math.min(sim.cssW - 10, p.x + vx * dt));
     p.bob += dt * 11;
     p.walkPhase += dt * 7;
-    p.stepDist += Math.abs(vx) * dt;
+    if (p.onGround) p.stepDist += Math.abs(vx) * dt;
   }
 
+  // la Puerta de Canto es infranqueable hasta resolver el acertijo:
+  // expulsión posicional (un resize puede dejar al jugador dentro de la banda)
+  if (!sim.gate.open) {
+    const gx = sim.gate.x;
+    const m = Math.max(9, sim.cssW * 0.008);
+    if (p.x > gx - m && p.x < gx + m) {
+      p.x = prevX <= gx ? gx - m : gx + m;
+    }
+  }
+
+  // salto y gravedad
+  const wantsJump = keys.jump;
+  keys.jump = false;
   const h = groundHeightAt(sim, p.x);
-  const targetY = sim.floorY - h - 7;
-  p.y += (targetY - p.y) * Math.min(1, 14 * dt);
+  const groundY = sim.floorY - h - 7;
+  if (wantsJump && p.onGround) {
+    p.vy = JUMP_VEL;
+    p.onGround = false;
+    audio.playJump();
+  }
+  if (!p.onGround) {
+    p.vy += FALL_GRAVITY * dt;
+    p.y += p.vy * dt;
+    if (p.vy >= 0 && p.y >= groundY) {
+      p.y = groundY;
+      p.vy = 0;
+      p.onGround = true;
+    }
+  } else {
+    // pegado al terreno; si el suelo cae de golpe (borde de duna), entra en caída
+    if (groundY - p.y > 20) {
+      p.onGround = false;
+      p.vy = 0;
+    } else {
+      p.y += (groundY - p.y) * Math.min(1, 14 * dt);
+    }
+  }
 
   if (p.stepDist >= STEP_EVERY) {
     p.stepDist = 0;
@@ -636,10 +783,53 @@ function stepWalk(
   }
   for (const t of p.trail) t.age += dt;
 
-  // recoger orbes de canto (solo caminando): cargan la magia, no reconstruyen aún
+  // piedras de canto: písalas de grave a agudo (raíz → tercera → quinta)
+  if (!sim.gate.open) {
+    let zone = -1;
+    let bestD = 14; // gana la piedra más cercana (las zonas pueden solaparse en pantallas chicas)
+    for (let s = 0; s < sim.stones.length; s++) {
+      const d = Math.abs(p.x - sim.stones[s].x);
+      if (d < bestD && p.onGround) {
+        bestD = d;
+        zone = s;
+      }
+    }
+    if (zone !== g.lastZone) {
+      g.lastZone = zone;
+      if (zone >= 0) {
+        const stone = sim.stones[zone];
+        if (stone.note === g.stoneSeq) {
+          stone.lit = true;
+          g.stoneSeq++;
+          audio.playStone(stone.note);
+          if (g.stoneSeq >= sim.stones.length) {
+            sim.gate.open = true;
+            sim.gate.anim = 1.2;
+            audio.playEco(0); // el acorde completo celebra
+          }
+        } else if (!stone.lit) {
+          g.stoneSeq = 0;
+          for (const st of sim.stones) st.lit = false;
+          audio.playThud();
+        }
+      }
+    }
+  }
+  if (sim.gate.anim > 0) sim.gate.anim = Math.max(0, sim.gate.anim - dt);
+
+  // recoger orbes de canto: cargan la magia (los flotantes exigen saltar)
   for (const eco of sim.ecos) {
-    eco.y = sim.floorY - groundHeightAt(sim, eco.x) - 14;
-    if (eco.collected || !p.moving || Math.abs(p.x - eco.x) > ECO_RADIUS) continue;
+    const ground = sim.floorY - groundHeightAt(sim, eco.x);
+    eco.y = ground - (eco.hover ? 78 : 14);
+    if (eco.collected) continue;
+    // en el suelo compartes superficie con el orbe: basta la cercanía horizontal
+    // (el suavizado vertical del jugador va con retraso en pendientes empinadas)
+    const nearY = eco.hover
+      ? Math.abs(p.y - 8 - eco.y) <= 24
+      : p.onGround || Math.abs(p.y - 8 - eco.y) <= 30;
+    const near = Math.abs(p.x - eco.x) <= ECO_RADIUS && nearY;
+    const active = p.moving || !p.onGround;
+    if (!near || !active) continue;
     eco.collected = true;
     audio.playEco(eco.group);
     g.orbs++;
@@ -794,6 +984,15 @@ function resettleFrom(prev: Sim, next: Sim): void {
     }
     // INTACT: buildSim ya lo colocó en su posición dentro de la imagen
   }
+  // tras el hechizo no queda arena SETTLED: conservar el relieve de ceniza
+  // para que la colisión siga coincidiendo con lo que se dibuja
+  if (prev.game.ghost) {
+    for (let c = 0; c < next.numCols; c++) {
+      const px = ((c + 0.5) * next.grainSize) / sx;
+      const pc = Math.min(prev.numCols - 1, Math.max(0, Math.floor(px / prev.grainSize)));
+      next.pileH[c] = prev.pileH[pc] * sy;
+    }
+  }
 }
 
 // coloca todos los granos ya asentados sobre pilas (tras un resize)
@@ -864,6 +1063,47 @@ function draw(
     ctx.fillRect(-5, -5, 10, 10);
     ctx.restore();
     ctx.globalAlpha = 1;
+  }
+
+  // piedras de canto: pilares con su nota a distinta altura (grave abajo, aguda arriba)
+  for (const stone of sim.stones) {
+    const ground = sim.floorY - groundHeightAt(sim, stone.x);
+    const ph = 10 + stone.note * 7;
+    ctx.fillStyle = stone.lit ? '#9ce8d8' : 'rgba(156,232,216,0.28)';
+    ctx.fillRect(stone.x - 4, ground - ph, 8, ph);
+    ctx.fillStyle = stone.lit ? '#e8fff8' : 'rgba(232,255,248,0.5)';
+    ctx.fillRect(stone.x - 2, ground - ph - 4, 4, 4);
+    if (stone.lit) {
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#9ce8d8';
+      ctx.beginPath();
+      ctx.arc(stone.x, ground - ph, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // la Puerta de Canto: barrera de luz hasta resolver el acertijo
+  if (!sim.gate.open) {
+    const gx = sim.gate.x;
+    const top = sim.imgY + sim.imgH * 0.4;
+    const shimmer = 0.35 + 0.2 * Math.sin(sim.walkClock * 2.5);
+    ctx.fillStyle = `rgba(232,168,124,${shimmer * 0.25})`;
+    ctx.fillRect(gx - 5, top, 10, sim.floorY - top);
+    ctx.fillStyle = `rgba(232,168,124,${shimmer})`;
+    for (let y = top; y < sim.floorY; y += 14) {
+      ctx.fillRect(gx - 1.5, y + ((sim.walkClock * 30) % 14), 3, 7);
+    }
+  } else if (sim.gate.anim > 0) {
+    const gx = sim.gate.x;
+    ctx.globalCompositeOperation = 'lighter';
+    for (let k = 0; k < 18; k++) {
+      const t = 1.2 - sim.gate.anim;
+      const a = k * 0.7 + sim.walkClock;
+      ctx.fillStyle = `rgba(246,217,168,${sim.gate.anim * 0.6})`;
+      ctx.fillRect(gx + Math.cos(a) * t * 60, sim.floorY - 40 - t * 90 + Math.sin(a) * 20, 2.5, 2.5);
+    }
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   // estela de pasos
@@ -943,10 +1183,32 @@ function draw(
     ctx.fillText('E — hechizo de reconstrucción', 14, 76);
   } else if (sim.walkClock < 9) {
     ctx.fillStyle = 'rgba(216,220,232,0.45)';
-    ctx.fillText('← → caminar', 14, 76);
+    ctx.fillText('← → caminar · ↑ saltar', 14, 76);
+  }
+  // pista del acertijo cuando estás cerca de las piedras
+  if (!sim.gate.open && sim.stones.length && Math.abs(p.x - sim.stones[1].x) < 130) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(156,232,216,0.7)';
+    ctx.fillText('las piedras cantan: písalas de grave a agudo', sim.stones[1].x, sim.floorY - 88);
+    ctx.textAlign = 'left';
   }
   ctx.textAlign = 'right';
   ctx.fillStyle = 'rgba(216,220,232,0.35)';
   ctx.fillText('nivel 1 · la espiral (fibonacci)', W - 14, 22);
   ctx.textAlign = 'left';
+
+  // cruzar el Marco: el lienzo nos absorbe (rectángulos concéntricos + destello)
+  if (sim.game.enterAnim > 0) {
+    const t = sim.game.enterAnim / 1.4;
+    ctx.fillStyle = `rgba(11,14,21,${t * 0.75})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = `rgba(232,168,124,${t})`;
+    for (let k = 0; k < 5; k++) {
+      const s = (1 - t) * (1 + k * 0.55);
+      const mw = (W / 2) * s;
+      const mh = (H / 2) * s;
+      ctx.lineWidth = 2 + k;
+      ctx.strokeRect(W / 2 - mw, H / 2 - mh, mw * 2, mh * 2);
+    }
+  }
 }

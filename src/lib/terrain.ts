@@ -34,15 +34,20 @@ export function fibonacciProfile(numCols: number, seed: number): Float32Array {
 // posiciones áureas para los orbes: las secciones 1/φ³, 1/φ², 1/φ del mapa
 export const GOLDEN_SECTIONS = [1 / PHI ** 3, 1 / PHI ** 2, 1 / PHI];
 
-// escala el perfil para que el área bajo la curva coincida con la arena disponible
-export function scaleProfileToArea(profile: Float32Array, targetArea: number): Float32Array {
+// escala el perfil para que el área bajo la curva coincida con la arena disponible;
+// maxH evita dunas más altas que la pantalla (el sobrante se asienta por física)
+export function scaleProfileToArea(
+  profile: Float32Array,
+  targetArea: number,
+  maxH = Infinity,
+): Float32Array {
   let area = 0;
   for (let c = 0; c < profile.length; c++) area += profile[c];
   const base = 0.25; // altura mínima: ninguna zona del mapa queda plana del todo
   const scaled = new Float32Array(profile.length);
   const k = targetArea / Math.max(1e-6, area + base * profile.length);
   for (let c = 0; c < profile.length; c++) {
-    scaled[c] = (profile[c] + base) * k;
+    scaled[c] = Math.min(maxH, (profile[c] + base) * k);
   }
   return scaled;
 }
