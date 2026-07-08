@@ -71,7 +71,8 @@ function makeFrame(char: Character, frame: number): HTMLCanvasElement {
 
   const skin = SKIN[char];
   const flag = FLAGS[char];
-  const eye = '#1a1420';
+  const eye = '#f6d9a8'; // ojos que brillan bajo la capucha
+  const cowl = '#232839'; // la capucha del custodio
 
   // --- cabeza (mirando a la derecha), y = 0..6 ---
   switch (char) {
@@ -123,6 +124,17 @@ function makeFrame(char: Character, frame: number): HTMLCanvasElement {
       px(9, 3, eye);
       break;
   }
+
+  // --- capucha: el manto envuelve la nuca y la frente; el hocico y las
+  // orejas asoman por delante, y los ojos brillan en la sombra ---
+  row(3, 8, 0, cowl);
+  for (let y = 1; y <= 6; y++) {
+    px(2, y, cowl);
+    px(3, y, cowl);
+  }
+  row(3, 6, 1, cowl);
+  px(4, 2, cowl);
+  px(5, 2, cowl);
 
   // --- batita con la bandera, y = 7..13 (ligeramente acampanada) ---
   const stripes = flag.length;

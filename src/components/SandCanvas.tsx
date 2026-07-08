@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { shade } from '../lib/color';
 import { fibonacciProfile, scaleProfileToArea, GOLDEN_SECTIONS } from '../lib/terrain';
-import { buildPlanes, PARALLAX, type DepthPlanes } from '../lib/planes';
+import { buildPlanes, buildDecor, PARALLAX, type DepthPlanes } from '../lib/planes';
 import { buildSprite, SPRITE_W, SPRITE_H, type Character, type SpriteSet } from '../lib/sprites';
 import type { CraterAudio } from '../lib/audio';
 import type { AnalyzedImage, Phase } from '../lib/types';
@@ -20,7 +20,8 @@ interface Props {
   onWin: () => void;
 }
 
-const TARGET_GRAINS = 12000;
+const TARGET_GRAINS = 14000;
+const WORLD_SCREENS = 3; // el mundo metroidvania: tres pantallas de ancho
 const GRAVITY = 1150; // px/s²
 const GROUP_STAGGER = 1.15; // s entre grupos
 const GRAIN_STAGGER = 1.0; // s de dispersión dentro de un grupo
@@ -58,7 +59,7 @@ interface Player {
   trail: Array<{ x: number; y: number; age: number }>;
 }
 
-const JUMP_VEL = -340;
+const JUMP_VEL = -375;
 const FALL_GRAVITY = 980;
 
 // piedra de canto del acertijo: písalas de grave a agudo para abrir la Puerta
@@ -74,6 +75,19 @@ interface Gate {
   x: number;
   open: boolean;
   anim: number; // chispas al abrirse
+}
+
+// plataformas flotantes en proporciones áureas: se atraviesan desde abajo
+interface Platform {
+  x: number;
+  y: number;
+  w: number;
+}
+
+// cámara con zoom: mapa completo en el estudio, seguimiento en la caminata
+interface Camera {
+  x: number;
+  zoom: number;
 }
 
 // estado del juego dentro del nivel
@@ -131,6 +145,10 @@ interface Sim {
   gate: Gate;
   stones: Stone[];
   planes: DepthPlanes;
+  worldW: number; // ancho del mundo (3 pantallas)
+  cam: Camera;
+  platforms: Platform[];
+  decor: HTMLCanvasElement; // árboles fibonacci, fósiles espirales, juncos
 }
 
 export function SandCanvas({
@@ -215,18 +233,19 @@ export function SandCanvas({
       const n = gu.length;
       if (n === 0) return null;
 
-      // layout: imagen centrada en el 66% superior
+      // el mundo: tres pantallas de ancho; la imagen flota sobre la pantalla central
+      const worldW = W * WORLD_SCREENS;
       const areaH = H * 0.66;
       const margin = 24;
-      const scale = Math.min((W - margin * 2) / iw, (areaH - margin * 2) / ih);
+      const scale = Math.min((W * 0.8) / iw, (areaH - margin * 2) / ih);
       const imgW = iw * scale;
       const imgH = ih * scale;
-      const imgX = (W - imgW) / 2;
+      const imgX = (worldW - imgW) / 2;
       const imgY = margin + (areaH - margin * 2 - imgH) / 2;
 
       const grainSize = Math.max(2, Math.min(4, Math.round(scale * Math.max(1, stride) * 0.9)));
       const floorY = H - 6;
-      const numCols = Math.ceil(W / grainSize);
+      const numCols = Math.ceil(worldW / grainSize);
 
       // orbes de canto: tres, en las secciones áureas del mapa (1/φ³, 1/φ², 1/φ),
       // asignados a los tres colores de mayor cobertura; el segundo flota (hay
@@ -237,27 +256,44 @@ export function SandCanvas({
         group: g,
         collected: false,
         hover: g === 1,
-        x: W * (0.05 + 0.9 * u),
+        x: worldW * (0.05 + 0.9 * u),
         y: floorY - 20,
       }));
 
       // la Puerta de Canto bloquea el último orbe; las piedras la abren
-      const gate: Gate = { u: 0.53, x: W * (0.05 + 0.9 * 0.53), open: false, anim: 0 };
+      const gate: Gate = { u: 0.53, x: worldW * (0.05 + 0.9 * 0.53), open: false, anim: 0 };
       // base 0.425: la primera piedra queda fuera de la zona del orbe flotante
       const stoneNotes = [1, 0, 2]; // desorden espacial: el oído es la llave
       const stones: Stone[] = stoneNotes.map((note, i) => ({
         u: 0.425 + i * 0.042,
-        x: W * (0.05 + 0.9 * (0.425 + i * 0.042)),
+        x: worldW * (0.05 + 0.9 * (0.425 + i * 0.042)),
         note,
         lit: false,
       }));
 
+      // plataformas flotantes: alturas y anchos de la sucesión de Fibonacci,
+      // repartidas por el ángulo áureo (nunca dos en el mismo sitio)
+      const FIBS = [1, 2, 3, 5, 8, 13];
+      const platforms: Platform[] = [];
+      for (let k = 0; k < 9; k++) {
+        const u = (k * 0.618034 + 0.11) % 1;
+        const fx = worldW * (0.06 + 0.88 * u);
+        // lejos de la puerta para no saltarla por arriba
+        if (Math.abs(fx - gate.x) < W * 0.06) continue;
+        platforms.push({
+          x: fx,
+          y: floorY - (42 + FIBS[k % 6] * 11),
+          w: 44 + FIBS[k % 6] * 7,
+        });
+      }
+
       // perfil Fibonacci: la arena disponible rellenará esta silueta
-      // (cada grano asentado suma grainSize*0.82 px a la altura de su columna;
+      // (cada grano asentado suma grainSize*1.7 px: arena esponjosa para que las
+      // dunas tengan cuerpo aun repartidas en tres pantallas;
       // el tope evita dunas más altas que la pantalla en lienzos pequeños)
       const targetH = scaleProfileToArea(
         fibonacciProfile(numCols, n),
-        n * grainSize * 0.82,
+        n * grainSize * 1.7,
         H * 0.52,
       );
 
@@ -291,7 +327,7 @@ export function SandCanvas({
         clock: 0,
         flash: new Float32Array(palette.length),
         player: {
-          x: W * 0.12,
+          x: worldW * 0.04,
           y: floorY - 20,
           vy: 0,
           onGround: false,
@@ -321,7 +357,11 @@ export function SandCanvas({
         },
         gate,
         stones,
-        planes: buildPlanes(W, H, palette, n),
+        planes: buildPlanes(W, worldW, H, palette, n),
+        worldW,
+        cam: { x: Math.max(0, (worldW - W) / 2), zoom: 1 },
+        platforms,
+        decor: buildDecor(worldW, H, floorY, palette, n),
         styles: palette.map((p) => [
           shade(p.hex, 0.72),
           p.hex,
@@ -364,9 +404,10 @@ export function SandCanvas({
       next.walkClock = prev.walkClock;
       next.player = {
         ...prev.player,
-        x: prev.player.x * (next.cssW / Math.max(1, prev.cssW)),
+        x: prev.player.x * (next.worldW / Math.max(1, prev.worldW)),
         trail: [],
       };
+      next.cam = { ...prev.cam };
       next.ecos.forEach((e, i) => (e.collected = prev.ecos[i]?.collected ?? false));
       next.game = { ...prev.game };
       next.gate.open = prev.gate.open;
@@ -456,7 +497,7 @@ export function SandCanvas({
     walkRef.current = walkMode;
     const sim = simRef.current;
     if (walkMode && sim) {
-      sim.player.x = sim.cssW * 0.12;
+      sim.player.x = sim.worldW * 0.04;
       sim.player.trail = [];
       sim.game.enterAnim = 1.4; // cruzar el Marco: la cámara se hunde en el lienzo
       audioRef.current.playEnter();
@@ -524,6 +565,7 @@ export function SandCanvas({
           stepWalk(sim, dt, keysRef.current, audioRef.current, callbacksRef.current);
         }
       }
+      updateCamera(sim, dt, walkRef.current, ph);
 
       for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
 
@@ -549,6 +591,7 @@ export function SandCanvas({
               stepWalk(sim, dt, keysRef.current, audioRef.current, callbacksRef.current);
             }
           }
+          updateCamera(sim, dt, walkRef.current, ph);
           for (let g = 0; g < sim.flash.length; g++) sim.flash[g] *= 0.9;
         }
         draw(ctx, sim, walkRef.current, spriteRef.current);
@@ -568,6 +611,9 @@ export function SandCanvas({
           stones: sim.stones.map((s) => ({ x: Math.round(s.x), note: s.note, lit: s.lit })),
           onGround: sim.player.onGround,
           vy: Math.round(sim.player.vy),
+          cam: { x: Math.round(sim.cam.x), zoom: Number(sim.cam.zoom.toFixed(3)) },
+          worldW: sim.worldW,
+          plataformas: sim.platforms.length,
         };
       };
       (window as unknown as Record<string, unknown>).__craterTeleport = (x: number) => {
@@ -615,8 +661,11 @@ function stepCollapse(
     if (st === INTACT) {
       if (sim.released[g] && sim.clock >= sim.releaseAt[g] + sim.delay[i]) {
         sim.state[i] = FALLING;
-        sim.vx[i] = (sim.phase01[i] - 0.5) * 130;
-        sim.vy[i] = -40 - sim.phase01[i] * 60;
+        // la imagen explota y siembra el mundo entero: cada grano vuela hacia
+        // su columna del mapa (el mundo es la imagen estirada a 3 pantallas)
+        const targetX = sim.worldW * (0.03 + 0.94 * sim.u[i]);
+        sim.vx[i] = (targetX - sim.x[i]) * 0.85 + (sim.phase01[i] - 0.5) * 70;
+        sim.vy[i] = -60 - sim.phase01[i] * 80;
       } else {
         allSettled = false;
         continue;
@@ -638,7 +687,7 @@ function stepCollapse(
       col = seekDeficit(sim, col);
       col = rollTo(sim, col);
       sim.state[i] = SETTLED;
-      sim.pileH[col] += sim.grainSize * 0.82;
+      sim.pileH[col] += sim.grainSize * 1.7;
       sim.x[i] = col * sim.grainSize + (sim.phase01[i] - 0.5) * sim.grainSize * 0.6;
       sim.y[i] = sim.floorY - sim.pileH[col];
       sim.vx[i] = 0;
@@ -657,7 +706,7 @@ function stepCollapse(
 // la arena obedece a la ecuación: el grano busca la columna cercana donde el
 // perfil Fibonacci aún tiene hambre (mayor déficit entre objetivo y pila real)
 function seekDeficit(sim: Sim, col: number): number {
-  const RANGE = 26;
+  const RANGE = 40;
   let best = col;
   let bestDeficit = sim.targetH[col] - sim.pileH[col];
   for (let d = 1; d <= RANGE; d++) {
@@ -696,6 +745,38 @@ function rollTo(sim: Sim, col: number): number {
   return c;
 }
 
+// la cámara: mapa completo en el estudio, imagen cercana en reposo,
+// y seguimiento con zoom 1:1 durante la caminata
+function updateCamera(sim: Sim, dt: number, walk: boolean, ph: Phase): void {
+  const W = sim.cssW;
+  let tz: number;
+  let tx: number;
+  if (walk) {
+    tz = 1;
+    tx = Math.max(0, Math.min(sim.worldW - W, sim.player.x - W / 2));
+  } else if (ph === 'intact' || ph === 'reforming') {
+    tz = 1;
+    tx = Math.max(0, Math.min(sim.worldW - W, sim.imgX + sim.imgW / 2 - W / 2));
+  } else {
+    // derrumbe y estudio: vista de mapa — se ven las tres pantallas
+    tz = W / sim.worldW;
+    tx = 0;
+  }
+  sim.cam.zoom += (tz - sim.cam.zoom) * Math.min(1, 2.4 * dt);
+  sim.cam.x += (tx - sim.cam.x) * Math.min(1, 3 * dt);
+}
+
+// superficie de apoyo bajo x: el terreno o la plataforma más alta al nivel
+// de los pies o por debajo (las plataformas se atraviesan desde abajo)
+function supportYAt(sim: Sim, x: number, y: number): number {
+  let s = sim.floorY - groundHeightAt(sim, x) - 7;
+  for (const pl of sim.platforms) {
+    const top = pl.y - 7;
+    if (Math.abs(x - pl.x) <= pl.w / 2 && top >= y - 4 && top < s) s = top;
+  }
+  return s;
+}
+
 // altura de la pila bajo x, suavizada con los vecinos
 function groundHeightAt(sim: Sim, x: number): number {
   const col = Math.min(sim.numCols - 1, Math.max(0, Math.floor(x / sim.grainSize)));
@@ -732,7 +813,7 @@ function stepWalk(
   p.moving = vx !== 0;
   if (p.moving) {
     p.dir = vx > 0 ? 1 : -1;
-    p.x = Math.max(10, Math.min(sim.cssW - 10, p.x + vx * dt));
+    p.x = Math.max(10, Math.min(sim.worldW - 10, p.x + vx * dt));
     p.bob += dt * 11;
     p.walkPhase += dt * 7;
     if (p.onGround) p.stepDist += Math.abs(vx) * dt;
@@ -748,31 +829,31 @@ function stepWalk(
     }
   }
 
-  // salto y gravedad
+  // salto y gravedad (el apoyo puede ser terreno o una plataforma áurea)
   const wantsJump = keys.jump;
   keys.jump = false;
-  const h = groundHeightAt(sim, p.x);
-  const groundY = sim.floorY - h - 7;
   if (wantsJump && p.onGround) {
     p.vy = JUMP_VEL;
     p.onGround = false;
     audio.playJump();
   }
+  const sup = supportYAt(sim, p.x, p.y);
   if (!p.onGround) {
     p.vy += FALL_GRAVITY * dt;
     p.y += p.vy * dt;
-    if (p.vy >= 0 && p.y >= groundY) {
-      p.y = groundY;
+    const supNow = supportYAt(sim, p.x, p.y - p.vy * dt); // apoyo visto desde arriba
+    if (p.vy >= 0 && p.y >= supNow) {
+      p.y = supNow;
       p.vy = 0;
       p.onGround = true;
     }
   } else {
-    // pegado al terreno; si el suelo cae de golpe (borde de duna), entra en caída
-    if (groundY - p.y > 20) {
+    // pegado al apoyo; si desaparece bajo los pies (borde), entra en caída
+    if (sup - p.y > 20) {
       p.onGround = false;
       p.vy = 0;
     } else {
-      p.y += (groundY - p.y) * Math.min(1, 14 * dt);
+      p.y += (sup - p.y) * Math.min(1, 14 * dt);
     }
   }
 
@@ -780,7 +861,9 @@ function stepWalk(
     p.stepDist = 0;
     let maxPile = 1;
     for (let c = 0; c < sim.numCols; c++) if (sim.pileH[c] > maxPile) maxPile = sim.pileH[c];
-    audio.playStep(h / maxPile);
+    // la altitud real del custodio elige la nota: plataformas altas, notas altas
+    const alt = sim.floorY - 7 - p.y;
+    audio.playStep(alt / Math.max(maxPile, 120));
     p.trail.push({ x: p.x, y: p.y + 5, age: 0 });
     if (p.trail.length > 7) p.trail.shift();
   }
@@ -880,7 +963,7 @@ function beginCast(sim: Sim, audio: { playCast: () => void }): void {
 
   // arena de ceniza: la huella gris de las dunas permanece cuando el color se va
   const ghost = document.createElement('canvas');
-  ghost.width = Math.max(1, Math.round(sim.cssW));
+  ghost.width = Math.max(1, Math.round(sim.worldW));
   ghost.height = Math.max(1, Math.round(sim.cssH));
   const gtx = ghost.getContext('2d');
   if (gtx) {
@@ -959,7 +1042,7 @@ function stepReform(sim: Sim, dt: number, cb: { onReformDone: () => void }): voi
 // reasentando los asentados y reescalando los que están cayendo
 function resettleFrom(prev: Sim, next: Sim): void {
   next.pileH.fill(0);
-  const sx = next.cssW / Math.max(1, prev.cssW);
+  const sx = next.worldW / Math.max(1, prev.worldW);
   const sy = next.cssH / Math.max(1, prev.cssH);
   for (let i = 0; i < next.n; i++) {
     const st = prev.state[i];
@@ -970,7 +1053,7 @@ function resettleFrom(prev: Sim, next: Sim): void {
         Math.max(0, Math.floor((prev.x[i] * sx) / next.grainSize)),
       );
       col = rollTo(next, col);
-      next.pileH[col] += next.grainSize * 0.82;
+      next.pileH[col] += next.grainSize * 1.7;
       next.x[i] = col * next.grainSize;
       next.y[i] = next.floorY - next.pileH[col];
     } else if (st === FALLING) {
@@ -1008,7 +1091,7 @@ function settleInstant(sim: Sim): void {
     );
     col = rollTo(sim, col);
     sim.state[i] = SETTLED;
-    sim.pileH[col] += sim.grainSize * 0.82;
+    sim.pileH[col] += sim.grainSize * 1.7;
     sim.x[i] = col * sim.grainSize;
     sim.y[i] = sim.floorY - sim.pileH[col];
   }
@@ -1022,14 +1105,13 @@ function draw(
 ): void {
   const W = sim.cssW;
   const H = sim.cssH;
+  const camX = sim.cam.x;
+  const z = sim.cam.zoom;
   ctx.clearRect(0, 0, W, H);
 
-  // profundidad 2.5D: cielo y planos lejanos con parallax por posición del custodio
-  const camX = walkMode ? sim.player.x - W / 2 : 0;
+  // profundidad 2.5D: cielo y planos lejanos, con parallax de cámara real
   const layer = (img: HTMLCanvasElement, f: number) => {
-    // relativo al mundo fijo: lo lejano acompaña al caminante, lo cercano barre en contra
-    const off = -(img.width - W) / 2 + camX * (1 - f);
-    ctx.drawImage(img, off, 0);
+    ctx.drawImage(img, -camX * f, 0);
   };
   if (walkMode) {
     ctx.drawImage(sim.planes.sky, 0, 0);
@@ -1037,14 +1119,23 @@ function draw(
     layer(sim.planes.mid, PARALLAX.mid);
   }
 
+  // --- el mundo, visto por la cámara (zoom de mapa o seguimiento 1:1) ---
+  ctx.save();
+  ctx.translate(0, (H * (1 - z)) / 2);
+  ctx.scale(z, z);
+  ctx.translate(-camX, 0);
+
   // suelo sutil
   ctx.fillStyle = 'rgba(255,255,255,0.05)';
-  ctx.fillRect(0, sim.floorY + sim.grainSize, W, 1);
+  ctx.fillRect(0, sim.floorY + sim.grainSize, sim.worldW, 1);
+
+  // decoración generada: árboles áureos, fósiles, juncos (la arena los entierra)
+  ctx.drawImage(sim.decor, 0, 0);
 
   // arena de ceniza: la huella que dejaron las dunas tras el hechizo
   if (sim.game.ghost) {
     ctx.globalAlpha = 0.85;
-    ctx.drawImage(sim.game.ghost, 0, 0, W, H);
+    ctx.drawImage(sim.game.ghost, 0, 0, sim.worldW, H);
     ctx.globalAlpha = 1;
   }
 
@@ -1062,7 +1153,20 @@ function draw(
     }
   }
 
-  if (!walkMode) return;
+  // plataformas áureas: losas flotantes con filo de luz
+  for (const pl of sim.platforms) {
+    ctx.fillStyle = '#151a28';
+    ctx.fillRect(pl.x - pl.w / 2, pl.y, pl.w, 7);
+    ctx.fillStyle = 'rgba(246,217,168,0.5)';
+    ctx.fillRect(pl.x - pl.w / 2, pl.y, pl.w, 1.6);
+    ctx.fillStyle = 'rgba(246,217,168,0.16)';
+    ctx.fillRect(pl.x - 1.5, pl.y + 7, 3, 5);
+  }
+
+  if (!walkMode) {
+    ctx.restore();
+    return;
+  }
 
   // ecos sin recoger: diamante pulsante con haz de luz
   for (let e = 0; e < sim.ecos.length; e++) {
@@ -1122,6 +1226,15 @@ function draw(
     ctx.globalCompositeOperation = 'source-over';
   }
 
+  // pista del acertijo cuando estás cerca de las piedras
+  if (!sim.gate.open && sim.stones.length && Math.abs(sim.player.x - sim.stones[1].x) < 150) {
+    ctx.textAlign = 'center';
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.fillStyle = 'rgba(156,232,216,0.7)';
+    ctx.fillText('las piedras cantan: písalas de grave a agudo', sim.stones[1].x, sim.floorY - 96);
+    ctx.textAlign = 'left';
+  }
+
   // estela de pasos
   for (const t of sim.player.trail) {
     const a = Math.max(0, 0.5 - t.age * 0.25);
@@ -1146,7 +1259,7 @@ function draw(
   ctx.fill();
   ctx.globalAlpha = 1;
   if (sprite) {
-    const scale = 2.6;
+    const scale = 3.6; // el custodio, más grande y presente
     const w = SPRITE_W * scale;
     const h = SPRITE_H * scale;
     const frame = p.moving ? 1 + (Math.floor(p.walkPhase * 2) % 2) : 0;
@@ -1178,6 +1291,8 @@ function draw(
     }
     ctx.globalCompositeOperation = 'source-over';
   }
+
+  ctx.restore(); // fin del espacio-mundo: lo que sigue vive en la pantalla
 
   // primer plano: siluetas oscuras que barren por delante del custodio
   layer(sim.planes.fore, PARALLAX.fore);
@@ -1230,16 +1345,14 @@ function draw(
     ctx.fillStyle = 'rgba(216,220,232,0.45)';
     ctx.fillText('← → caminar · ↑ saltar', 14, hudY + 66);
   }
-  // pista del acertijo cuando estás cerca de las piedras
-  if (!sim.gate.open && sim.stones.length && Math.abs(p.x - sim.stones[1].x) < 130) {
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(156,232,216,0.7)';
-    ctx.fillText('las piedras cantan: písalas de grave a agudo', sim.stones[1].x, sim.floorY - 88);
-    ctx.textAlign = 'left';
-  }
   ctx.textAlign = 'right';
   ctx.fillStyle = 'rgba(216,220,232,0.35)';
-  ctx.fillText('nivel 1 · la espiral (fibonacci)', W - 14, hudY + 12);
+  const seccion = Math.min(WORLD_SCREENS, Math.floor(p.x / W) + 1);
+  ctx.fillText(
+    `nivel 1 · la espiral (fibonacci) · sección ${seccion}/${WORLD_SCREENS}`,
+    W - 14,
+    hudY + 12,
+  );
   ctx.textAlign = 'left';
 
   // cruzar el Marco: el lienzo nos absorbe (rectángulos concéntricos + destello)
