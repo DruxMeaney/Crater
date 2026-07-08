@@ -20,6 +20,16 @@ export function rgbToHex(r: number, g: number, b: number): string {
   return `#${to(r)}${to(g)}${to(b)}`;
 }
 
+export function mix(hexA: string, hexB: string, t: number): string {
+  const pa = [1, 3, 5].map((i) => parseInt(hexA.slice(i, i + 2), 16));
+  const pb = [1, 3, 5].map((i) => parseInt(hexB.slice(i, i + 2), 16));
+  return rgbToHex(
+    pa[0] + (pb[0] - pa[0]) * t,
+    pa[1] + (pb[1] - pa[1]) * t,
+    pa[2] + (pb[2] - pa[2]) * t,
+  );
+}
+
 export function shade(hex: string, factor: number): string {
   // factor > 1 aclara, < 1 oscurece
   const r = parseInt(hex.slice(1, 3), 16);

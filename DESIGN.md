@@ -64,6 +64,32 @@ y la música usan las proporciones de esa figura.
   abren si reordenas los pasos del secuenciador para tocar la progresión oculta del
   cuadro. El acertijo ES musical: el conocimiento del Canto es la llave.
 
+## Profundidad 2.5D (estilo REPLACED)
+
+El cuadro no es un telón: es un mundo con capas, todas generadas desde su paleta.
+
+| Plano | Parallax | Qué es |
+|---|---|---|
+| Cielo | fijo | gradiente de los colores del cuadro + estrellas |
+| Montañas lejanas | 0.22 | silueta Fibonacci casi del color del cielo, con bruma |
+| Colinas medias | 0.5 | segunda silueta, un paso más presente |
+| **Mundo jugable** | 1.0 | las dunas de arena, el custodio, orbes, piedras, Puerta |
+| Primer plano | 1.35 | siluetas casi negras (cipreses, agujas) que barren por delante |
+
+Más polvo de pintura suspendido en tres profundidades y letterbox cinematográfico.
+El parallax es relativo a la posición del custodio: lo lejano te acompaña,
+lo cercano barre en contra — profundidad de diorama sin cámara compleja.
+
+## Motor: ¿web o Unity?
+
+Decisión (2026-07): **seguir en el stack web** mientras el juego sea 2D/2.5D.
+El look REPLACED se logró con capas de canvas (ver arriba); lo insustituible de
+Crater es el motor de música generativa (Tone.js/Web Audio), que en Unity habría
+que reinventar. Cambiar de motor se reevalúa solo si aparece una de estas tres:
+(a) 3D real, (b) ports a consola, (c) física compleja. En ese caso el candidato
+es **Godot** (mejor 2D, open source, exporta a Steam igual) antes que Unity; el
+algoritmo paleta→armonía es TypeScript puro y se porta a cualquier motor.
+
 ## Por qué así
 
 - **Todo generado con matemáticas**: sprites dibujados por código, terreno por

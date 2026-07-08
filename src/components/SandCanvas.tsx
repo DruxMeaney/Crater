@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { shade } from '../lib/color';
 import { fibonacciProfile, scaleProfileToArea, GOLDEN_SECTIONS } from '../lib/terrain';
+import { buildPlanes, PARALLAX, type DepthPlanes } from '../lib/planes';
 import { buildSprite, SPRITE_W, SPRITE_H, type Character, type SpriteSet } from '../lib/sprites';
 import type { CraterAudio } from '../lib/audio';
 import type { AnalyzedImage, Phase } from '../lib/types';
@@ -129,6 +130,7 @@ interface Sim {
   game: GameState;
   gate: Gate;
   stones: Stone[];
+  planes: DepthPlanes;
 }
 
 export function SandCanvas({
@@ -319,6 +321,7 @@ export function SandCanvas({
         },
         gate,
         stones,
+        planes: buildPlanes(W, H, palette, n),
         styles: palette.map((p) => [
           shade(p.hex, 0.72),
           p.hex,
@@ -1021,6 +1024,19 @@ function draw(
   const H = sim.cssH;
   ctx.clearRect(0, 0, W, H);
 
+  // profundidad 2.5D: cielo y planos lejanos con parallax por posición del custodio
+  const camX = walkMode ? sim.player.x - W / 2 : 0;
+  const layer = (img: HTMLCanvasElement, f: number) => {
+    // relativo al mundo fijo: lo lejano acompaña al caminante, lo cercano barre en contra
+    const off = -(img.width - W) / 2 + camX * (1 - f);
+    ctx.drawImage(img, off, 0);
+  };
+  if (walkMode) {
+    ctx.drawImage(sim.planes.sky, 0, 0);
+    layer(sim.planes.far, PARALLAX.far);
+    layer(sim.planes.mid, PARALLAX.mid);
+  }
+
   // suelo sutil
   ctx.fillStyle = 'rgba(255,255,255,0.05)';
   ctx.fillRect(0, sim.floorY + sim.grainSize, W, 1);
@@ -1119,8 +1135,12 @@ function draw(
   // el custodio: sprite pixel con piernitas animadas
   const p = sim.player;
   const bobY = p.moving ? Math.sin(p.bob) * 1.4 : 0;
-  ctx.globalAlpha = 0.1;
+  ctx.globalAlpha = 0.08;
   ctx.fillStyle = '#f6d9a8';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y + bobY - 8, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.14;
   ctx.beginPath();
   ctx.arc(p.x, p.y + bobY - 8, 20, 0, Math.PI * 2);
   ctx.fill();
@@ -1159,7 +1179,32 @@ function draw(
     ctx.globalCompositeOperation = 'source-over';
   }
 
-  // HUD: vida, magia, orbes
+  // primer plano: siluetas oscuras que barren por delante del custodio
+  layer(sim.planes.fore, PARALLAX.fore);
+
+  // polvo de pintura suspendido en el aire (tres capas de profundidad)
+  for (let k = 0; k < 34; k++) {
+    const tier = k % 3;
+    const speed = 5 + tier * 4;
+    const dx = ((k * 137.5 + sim.walkClock * speed) % (W * 1.15)) - W * 0.07;
+    const dy = ((k * 71.3) % (H * 0.82)) + Math.sin(sim.walkClock * 0.6 + k) * 14;
+    ctx.globalAlpha = 0.08 + tier * 0.07;
+    ctx.fillStyle = '#f6d9a8';
+    const size = 1 + tier * 0.7;
+    ctx.fillRect(dx - camX * (0.3 + tier * 0.35) * 0.2, dy, size, size);
+  }
+  ctx.globalAlpha = 1;
+
+  // letterbox cinematográfico: el Marco encuadra la escena
+  const barH = Math.min(H * 0.07, 44) * (1 - Math.min(1, sim.game.enterAnim / 1.4));
+  if (barH > 0.5) {
+    ctx.fillStyle = '#05070c';
+    ctx.fillRect(0, 0, W, barH);
+    ctx.fillRect(0, H - barH, W, barH);
+  }
+
+  // HUD: vida, magia, orbes (debajo del letterbox)
+  const hudY = barH + 10;
   const bar = (y: number, value: number, color: string, label: string) => {
     ctx.fillStyle = 'rgba(216,220,232,0.7)';
     ctx.font = '11px ui-monospace, monospace';
@@ -1169,21 +1214,21 @@ function draw(
     ctx.fillStyle = color;
     ctx.fillRect(28, y, 110 * (value / 100), 6);
   };
-  bar(16, g.hp, '#e87c8c', '♥');
-  bar(30, g.magic, '#9ce8d8', '✦');
+  bar(hudY + 6, g.hp, '#e87c8c', '♥');
+  bar(hudY + 20, g.magic, '#9ce8d8', '✦');
   ctx.font = '12px ui-monospace, monospace';
   ctx.fillStyle = 'rgba(216,220,232,0.8)';
-  ctx.fillText(`orbes ${g.orbs}/${sim.ecos.length}`, 14, 58);
+  ctx.fillText(`orbes ${g.orbs}/${sim.ecos.length}`, 14, hudY + 48);
   if (g.castDone) {
     ctx.fillStyle = '#f6d9a8';
-    ctx.fillText('canto restaurado ✦', 14, 76);
+    ctx.fillText('canto restaurado ✦', 14, hudY + 66);
   } else if (g.ghost === null && g.orbs >= sim.ecos.length && g.magic >= 99) {
     const pulse = 0.55 + 0.45 * Math.sin(sim.walkClock * 4);
     ctx.fillStyle = `rgba(246,217,168,${pulse})`;
-    ctx.fillText('E — hechizo de reconstrucción', 14, 76);
+    ctx.fillText('E — hechizo de reconstrucción', 14, hudY + 66);
   } else if (sim.walkClock < 9) {
     ctx.fillStyle = 'rgba(216,220,232,0.45)';
-    ctx.fillText('← → caminar · ↑ saltar', 14, 76);
+    ctx.fillText('← → caminar · ↑ saltar', 14, hudY + 66);
   }
   // pista del acertijo cuando estás cerca de las piedras
   if (!sim.gate.open && sim.stones.length && Math.abs(p.x - sim.stones[1].x) < 130) {
@@ -1194,7 +1239,7 @@ function draw(
   }
   ctx.textAlign = 'right';
   ctx.fillStyle = 'rgba(216,220,232,0.35)';
-  ctx.fillText('nivel 1 · la espiral (fibonacci)', W - 14, 22);
+  ctx.fillText('nivel 1 · la espiral (fibonacci)', W - 14, hudY + 12);
   ctx.textAlign = 'left';
 
   // cruzar el Marco: el lienzo nos absorbe (rectángulos concéntricos + destello)
