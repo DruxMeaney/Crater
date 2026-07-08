@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { shade } from '../lib/color';
+import { shade, saturate } from '../lib/color';
 import { fibonacciProfile, scaleProfileToArea, GOLDEN_SECTIONS } from '../lib/terrain';
 import { buildPlanes, buildDecor, PARALLAX, type DepthPlanes } from '../lib/planes';
 import { buildSprite, SPRITE_W, SPRITE_H, type Character, type SpriteSet } from '../lib/sprites';
@@ -362,12 +362,11 @@ export function SandCanvas({
         cam: { x: Math.max(0, (worldW - W) / 2), zoom: 1 },
         platforms,
         decor: buildDecor(worldW, H, floorY, palette, n),
-        styles: palette.map((p) => [
-          shade(p.hex, 0.72),
-          p.hex,
-          shade(p.hex, 1.22),
-          shade(p.hex, 1.6), // flash
-        ]),
+        styles: palette.map((p) => {
+          // arena saturada: la noche es intensa, no gris
+          const base = saturate(p.hex, 1.35);
+          return [shade(base, 0.6), base, saturate(shade(base, 1.3), 1.1), shade(base, 1.7)];
+        }),
       };
 
       // posiciones iniciales + delays pseudoaleatorios deterministas
@@ -1153,6 +1152,14 @@ function draw(
     }
   }
 
+  // luz de luna perfilando las crestas de las dunas
+  ctx.fillStyle = 'rgba(205,225,255,0.15)';
+  for (let c = 0; c < sim.numCols; c += 3) {
+    const ph = sim.pileH[c];
+    if (ph < 8) continue;
+    ctx.fillRect(c * gs, sim.floorY - ph - 1.5, gs * 3, 1.6);
+  }
+
   // plataformas áureas: losas flotantes con filo de luz
   for (const pl of sim.platforms) {
     ctx.fillStyle = '#151a28';
@@ -1167,6 +1174,39 @@ function draw(
     ctx.restore();
     return;
   }
+
+  // pozos de luz: los objetos mágicos bañan la arena a su alrededor
+  const pool = (x: number, y: number, r: number, rgb: string, a: number) => {
+    const g2 = ctx.createRadialGradient(x, y, 2, x, y, r);
+    g2.addColorStop(0, `rgba(${rgb},${a})`);
+    g2.addColorStop(1, `rgba(${rgb},0)`);
+    ctx.fillStyle = g2;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  };
+  for (const eco of sim.ecos) {
+    if (!eco.collected) pool(eco.x, eco.y + 6, 58, '156,232,216', 0.12);
+  }
+  for (const stone of sim.stones) {
+    const sg = sim.floorY - groundHeightAt(sim, stone.x);
+    pool(stone.x, sg - 8, 40, '156,232,216', stone.lit ? 0.2 : 0.07);
+  }
+  if (!sim.gate.open) pool(sim.gate.x, sim.floorY - 60, 80, '232,168,124', 0.09);
+
+  // luciérnagas: derivan entre los árboles con brillo pulsante
+  for (let k = 0; k < 18; k++) {
+    const fx =
+      sim.worldW * ((k * 0.618034 + 0.05) % 1) +
+      Math.sin(sim.walkClock * (0.3 + (k % 4) * 0.13) + k * 2.2) * 26;
+    const fy =
+      sim.floorY - 26 - ((k * 53) % 70) + Math.sin(sim.walkClock * (0.7 + (k % 3) * 0.21) + k) * 9;
+    const tw = 0.5 + 0.5 * Math.sin(sim.walkClock * 2.3 + k * 1.7);
+    ctx.fillStyle = '#ffd27d';
+    ctx.globalAlpha = 0.2 + 0.55 * tw;
+    ctx.fillRect(fx, fy, 2, 2);
+    ctx.globalAlpha = (0.2 + 0.55 * tw) * 0.3;
+    ctx.fillRect(fx - 1.5, fy - 1.5, 5, 5);
+  }
+  ctx.globalAlpha = 1;
 
   // ecos sin recoger: diamante pulsante con haz de luz
   for (let e = 0; e < sim.ecos.length; e++) {
@@ -1296,6 +1336,11 @@ function draw(
 
   // primer plano: siluetas oscuras que barren por delante del custodio
   layer(sim.planes.fore, PARALLAX.fore);
+
+  // viñeta nocturna + baño azul de luna
+  ctx.drawImage(sim.planes.vignette, 0, 0);
+  ctx.fillStyle = 'rgba(46,64,140,0.05)';
+  ctx.fillRect(0, 0, W, H);
 
   // polvo de pintura suspendido en el aire (tres capas de profundidad)
   for (let k = 0; k < 34; k++) {

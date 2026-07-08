@@ -20,6 +20,35 @@ export function rgbToHex(r: number, g: number, b: number): string {
   return `#${to(r)}${to(g)}${to(b)}`;
 }
 
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let rgb: [number, number, number];
+  if (hp < 1) rgb = [c, x, 0];
+  else if (hp < 2) rgb = [x, c, 0];
+  else if (hp < 3) rgb = [0, c, x];
+  else if (hp < 4) rgb = [0, x, c];
+  else if (hp < 5) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  const m = l - c / 2;
+  return [(rgb[0] + m) * 255, (rgb[1] + m) * 255, (rgb[2] + m) * 255];
+}
+
+// sube la saturación (y opcionalmente la luz) sin cambiar el matiz
+export function saturate(hex: string, satFactor: number, lightBoost = 0): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const { h, s, l } = rgbToHsl(r, g, b);
+  const [nr, ng, nb] = hslToRgb(
+    h,
+    Math.min(1, s * satFactor),
+    Math.max(0, Math.min(1, l + lightBoost)),
+  );
+  return rgbToHex(nr, ng, nb);
+}
+
 export function mix(hexA: string, hexB: string, t: number): string {
   const pa = [1, 3, 5].map((i) => parseInt(hexA.slice(i, i + 2), 16));
   const pb = [1, 3, 5].map((i) => parseInt(hexB.slice(i, i + 2), 16));
